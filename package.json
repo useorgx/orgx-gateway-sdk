@@ -1,0 +1,46 @@
+{
+  "name": "@orgx/gateway-sdk",
+  "version": "0.1.0-alpha.0",
+  "description": "Client SDK for OrgX Gateway Protocol v1. Each editor plugin is a self-sufficient peer that opens its own authenticated WebSocket to OrgX server and implements this protocol directly. No central broker.",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "PROTOCOL.md",
+    "PEER_ARCHITECTURE.md",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "type-check": "tsc --noEmit",
+    "test": "echo '@orgx/gateway-sdk test: no-op in MVP'"
+  },
+  "keywords": [
+    "orgx",
+    "gateway",
+    "protocol",
+    "websocket",
+    "plugin-peer"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/useorgx/gateway-sdk.git"
+  },
+  "author": "OrgX",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
