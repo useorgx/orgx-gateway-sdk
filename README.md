@@ -1,4 +1,4 @@
-# @orgx/gateway-sdk
+# @useorgx/orgx-gateway-sdk
 
 Client SDK for OrgX Gateway Protocol v1.
 
@@ -9,7 +9,7 @@ See [PEER_ARCHITECTURE.md](./PEER_ARCHITECTURE.md) for the full model and [PROTO
 ## Minimal peer
 
 ```ts
-import { PeerClient, type Driver } from '@orgx/gateway-sdk';
+import { PeerClient, type Driver } from '@useorgx/orgx-gateway-sdk';
 
 class ClaudeCodeDriver implements Driver {
   readonly id = 'claude_code' as const;

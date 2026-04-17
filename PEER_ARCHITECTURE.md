@@ -2,7 +2,7 @@
 
 **Each editor plugin is a self-sufficient peer.** It opens its own authenticated WebSocket to OrgX server, receives `task.dispatch` intents, runs the task in its editor session, and posts its own receipts + deviations + license heartbeat.
 
-There is no central broker. `@orgx/gateway-sdk` is a **shared client library**, not a hub. It ships the typed message shapes, the Driver interface, and a skeleton `PeerClient` that manages a single WebSocket connection. Each plugin consumes this library independently.
+There is no central broker. `@useorgx/orgx-gateway-sdk` is a **shared client library**, not a hub. It ships the typed message shapes, the Driver interface, and a skeleton `PeerClient` that manages a single WebSocket connection. Each plugin consumes this library independently.
 
 ## Peers today
 
