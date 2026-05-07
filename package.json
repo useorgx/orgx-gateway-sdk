@@ -24,6 +24,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepare": "npm run build",
     "type-check": "tsc --noEmit",
     "test": "echo '@useorgx/orgx-gateway-sdk test: no-op in MVP'"
   },
