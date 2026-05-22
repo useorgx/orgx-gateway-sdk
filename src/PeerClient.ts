@@ -7,13 +7,13 @@
  * the next PR alongside the first real plugin adoption.
  */
 
-import type { Driver } from './Driver';
+import type { Driver } from './Driver.js';
 import {
   PROTOCOL_VERSION,
   type PeerToServerMessage,
   type ProtocolMessage,
   type ServerToPeerMessage,
-} from './protocol';
+} from './protocol.js';
 
 export type PeerClientConfig = {
   /** Base URL, e.g. `wss://useorgx.com` */

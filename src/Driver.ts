@@ -11,7 +11,7 @@ import type {
   DispatchableTask,
   PeerToServerMessage,
   TaskDriver,
-} from './protocol';
+} from './protocol.js';
 
 export type DriverStatus = {
   installed: boolean;
