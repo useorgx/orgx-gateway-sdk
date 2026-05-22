@@ -17,7 +17,8 @@
     "dist",
     "PROTOCOL.md",
     "PEER_ARCHITECTURE.md",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"
@@ -40,7 +41,7 @@
     "url": "https://github.com/useorgx/orgx-gateway-sdk.git"
   },
   "author": "OrgX",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "devDependencies": {
     "typescript": "^5.4.0"
   }

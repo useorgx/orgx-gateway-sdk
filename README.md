@@ -2,6 +2,8 @@
 
 Client SDK for OrgX Gateway Protocol v1.
 
+License: MIT.
+
 **Each editor plugin is a self-sufficient peer.** It opens its own authenticated WebSocket to OrgX server and implements the protocol directly. No central broker. This package is a shared TypeScript client + Driver interface, not a hub.
 
 See [PEER_ARCHITECTURE.md](./PEER_ARCHITECTURE.md) for the full model and [PROTOCOL.md](./PROTOCOL.md) for the wire spec.
