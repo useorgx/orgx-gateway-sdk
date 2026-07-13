@@ -43,6 +43,11 @@ Every `task.dispatch` carries an `idempotency_key`. Peers MUST deduplicate by th
 
 `task.completed` is posted exactly once per `run_id`. If a connection drops before the peer sends it, the peer MUST re-post `execution_receipt` via HTTP (survives WS outages). The server deduplicates on `run_id`.
 
+The shared `PeerClient` enforces both guarantees with a bounded in-memory
+idempotency cache and `POST /api/v1/runs/:run_id/receipt` recovery. Transient
+socket closes reconnect with bounded exponential backoff. Protocol, auth, and
+intentional close codes do not reconnect.
+
 ## Authorization scopes
 
 `oxk_` keys used for the gateway stream MUST have the `gateway:drive` scope. A narrower scope is rejected on handshake. Broader scopes (e.g. `workspace:admin`) are accepted but unnecessary — use the narrowest scope that works.
