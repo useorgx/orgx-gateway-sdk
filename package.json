@@ -1,6 +1,6 @@
 {
   "name": "@useorgx/orgx-gateway-sdk",
-  "version": "0.1.0-alpha.0",
+  "version": "0.1.0-alpha.1",
   "description": "Client SDK for OrgX Gateway Protocol v1. Each editor plugin is a self-sufficient peer that opens its own authenticated WebSocket to OrgX server and implements this protocol directly. No central broker.",
   "type": "module",
   "main": "dist/index.js",
@@ -27,7 +27,7 @@
     "build": "tsc",
     "prepare": "npm run build",
     "type-check": "tsc --noEmit",
-    "test": "echo '@useorgx/orgx-gateway-sdk test: no-op in MVP'"
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "keywords": [
     "orgx",

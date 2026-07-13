@@ -1,10 +1,9 @@
 /**
- * PeerClient — skeleton WebSocket client each plugin peer uses to talk to
- * OrgX server. One peer = one client = one connection.
+ * Durable client for one OrgX gateway peer.
  *
- * This MVP ships the connection lifecycle + typed send/recv. A full retry
- * policy with protocol-version negotiation + killswitch handling lands in
- * the next PR alongside the first real plugin adoption.
+ * The client owns four guarantees that every editor integration needs:
+ * bounded reconnect, dispatch idempotency, cancellation, and an HTTP receipt
+ * fallback when a completion cannot be delivered over the socket.
  */
 
 import type { Driver } from './Driver.js';
@@ -13,10 +12,29 @@ import {
   type PeerToServerMessage,
   type ProtocolMessage,
   type ServerToPeerMessage,
+  type TaskCompletedMessage,
 } from './protocol.js';
 
+export type WebSocketEvent = { code?: number; reason?: string; data?: unknown };
+
+export interface WebSocketLike {
+  addEventListener(
+    type: 'open' | 'close' | 'error' | 'message',
+    listener: (event: WebSocketEvent) => void
+  ): void;
+  close(code?: number, reason?: string): void;
+  send(data: string): void;
+}
+
+export type ReconnectPolicy = {
+  maxAttempts?: number;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  jitterRatio?: number;
+};
+
 export type PeerClientConfig = {
-  /** Base URL, e.g. `wss://useorgx.com` */
+  /** Base URL, e.g. `wss://useorgx.com`. */
   baseUrl: string;
   /** OrgX API key with `gateway:drive` scope. */
   apiKey: string;
@@ -24,25 +42,54 @@ export type PeerClientConfig = {
   pluginId: string;
   /** Which drivers this peer registers. Typically a single-element array. */
   drivers: Driver[];
-  /** Called for every message the server sends; the default routes via
-      #defaultHandle which matches on kind and delegates to the right driver. */
+  /** Optional installation identity advertised to the gateway. */
+  installationId?: string;
+  /** Called instead of the default task router when supplied. */
   onMessage?: (msg: ServerToPeerMessage) => void;
-  /** Connection lifecycle hooks. */
   onOpen?: () => void;
   onClose?: (code: number, reason: string) => void;
   onError?: (err: unknown) => void;
+  onReconnectScheduled?: (attempt: number, delayMs: number) => void;
+  reconnect?: ReconnectPolicy | false;
+  /** Injectable boundaries keep the lifecycle deterministic in tests. */
+  webSocketFactory?: (url: string, protocols: string[]) => WebSocketLike;
+  fetch?: typeof globalThis.fetch;
+  random?: () => number;
+  setTimeout?: typeof globalThis.setTimeout;
+  clearTimeout?: typeof globalThis.clearTimeout;
 };
 
-export type PeerClientState = 'idle' | 'connecting' | 'open' | 'closing' | 'closed';
+export type PeerClientState =
+  | 'idle'
+  | 'connecting'
+  | 'open'
+  | 'reconnecting'
+  | 'closing'
+  | 'closed';
+
+const DEFAULT_RECONNECT = {
+  maxAttempts: 8,
+  initialDelayMs: 500,
+  maxDelayMs: 30_000,
+  jitterRatio: 0.2,
+} as const;
+const IDEMPOTENCY_CACHE_LIMIT = 1_000;
+const NON_RETRYABLE_CLOSE_CODES = new Set([1000, 4000, 4001, 4003, 4401, 4403]);
 
 export class PeerClient {
-  private ws: WebSocket | null = null;
+  private ws: WebSocketLike | null = null;
   private state: PeerClientState = 'idle';
-  private driversById = new Map<string, Driver>();
+  private readonly driversById = new Map<string, Driver>();
+  private readonly completedDispatches = new Map<string, string>();
+  private readonly inFlightDispatches = new Map<string, Promise<void>>();
+  private readonly pendingReceipts = new Map<string, TaskCompletedMessage>();
+  private reconnectAttempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private manualClose = false;
 
-  constructor(private config: PeerClientConfig) {
-    for (const d of config.drivers) {
-      this.driversById.set(d.id, d);
+  constructor(private readonly config: PeerClientConfig) {
+    for (const driver of config.drivers) {
+      this.driversById.set(driver.id, driver);
     }
   }
 
@@ -50,52 +97,23 @@ export class PeerClient {
     return this.state;
   }
 
+  get advertisedDrivers(): string[] {
+    return Array.from(this.driversById.keys());
+  }
+
   connect(): void {
     if (this.state === 'open' || this.state === 'connecting') return;
-    this.state = 'connecting';
-
-    const url = new URL('/api/v1/gateway/stream', this.config.baseUrl);
-    url.searchParams.set('workspace_id', this.config.workspaceId);
-    url.searchParams.set('plugin_id', this.config.pluginId);
-    url.searchParams.set(
-      'drivers',
-      Array.from(this.driversById.keys()).join(',')
-    );
-    // WebSocket API doesn't expose custom headers; pass bearer via subprotocol.
-    const subprotocol = `bearer.${this.config.apiKey}`;
-    const proto = `orgx.v${PROTOCOL_VERSION}`;
-
-    // Browser WebSocket takes a single subprotocols string or array; include
-    // both the bearer token and the protocol version so the server can reject
-    // mismatched versions before the first message.
-    this.ws = new WebSocket(url.toString(), [proto, subprotocol]);
-    this.ws.addEventListener('open', () => {
-      this.state = 'open';
-      this.config.onOpen?.();
-    });
-    this.ws.addEventListener('close', (ev) => {
-      this.state = 'closed';
-      this.config.onClose?.(ev.code, ev.reason);
-    });
-    this.ws.addEventListener('error', (ev) => {
-      this.config.onError?.(ev);
-    });
-    this.ws.addEventListener('message', (ev) => {
-      try {
-        const msg = JSON.parse(ev.data) as ServerToPeerMessage;
-        if (this.config.onMessage) {
-          this.config.onMessage(msg);
-        } else {
-          void this.defaultHandle(msg);
-        }
-      } catch (err) {
-        this.config.onError?.(err);
-      }
-    });
+    this.manualClose = false;
+    this.openSocket();
   }
 
   disconnect(code = 1000, reason = 'client closing'): void {
-    if (this.state === 'closed' || !this.ws) return;
+    this.manualClose = true;
+    this.clearReconnect();
+    if (!this.ws || this.state === 'closed') {
+      this.state = 'closed';
+      return;
+    }
     this.state = 'closing';
     this.ws.close(code, reason);
   }
@@ -107,35 +125,224 @@ export class PeerClient {
     this.ws.send(JSON.stringify(message));
   }
 
-  /**
-   * Default router: on `task.dispatch`, pick the driver matching task.driver,
-   * run its async iterator, and stream each yielded message back to the server.
-   */
+  private openSocket(): void {
+    this.clearReconnect();
+    this.state = this.reconnectAttempt > 0 ? 'reconnecting' : 'connecting';
+
+    const url = new URL('/api/v1/gateway/stream', this.config.baseUrl);
+    url.searchParams.set('workspace_id', this.config.workspaceId);
+    url.searchParams.set('plugin_id', this.config.pluginId);
+    url.searchParams.set('drivers', this.advertisedDrivers.join(','));
+    if (this.config.installationId) {
+      url.searchParams.set('installation_id', this.config.installationId);
+    }
+
+    const protocols = [
+      `orgx.v${PROTOCOL_VERSION}`,
+      `bearer.${this.config.apiKey}`,
+    ];
+    const factory =
+      this.config.webSocketFactory ??
+      ((socketUrl: string, socketProtocols: string[]) =>
+        new WebSocket(socketUrl, socketProtocols));
+
+    try {
+      const socket = factory(url.toString(), protocols);
+      this.ws = socket;
+      socket.addEventListener('open', () => {
+        if (socket !== this.ws) return;
+        this.state = 'open';
+        this.reconnectAttempt = 0;
+        this.config.onOpen?.();
+        void this.flushPendingReceipts();
+      });
+      socket.addEventListener('close', (event) => {
+        if (socket !== this.ws) return;
+        this.ws = null;
+        const code = event.code ?? 1006;
+        const reason = event.reason ?? '';
+        this.state = 'closed';
+        this.config.onClose?.(code, reason);
+        if (!this.manualClose && !NON_RETRYABLE_CLOSE_CODES.has(code)) {
+          this.scheduleReconnect();
+        }
+      });
+      socket.addEventListener('error', (event) => {
+        this.config.onError?.(event);
+      });
+      socket.addEventListener('message', (event) => {
+        try {
+          const msg = JSON.parse(String(event.data)) as ServerToPeerMessage;
+          if (this.config.onMessage) this.config.onMessage(msg);
+          else void this.defaultHandle(msg);
+        } catch (error) {
+          this.config.onError?.(error);
+        }
+      });
+    } catch (error) {
+      this.ws = null;
+      this.state = 'closed';
+      this.config.onError?.(error);
+      this.scheduleReconnect();
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.config.reconnect === false || this.manualClose) return;
+    const policy = { ...DEFAULT_RECONNECT, ...(this.config.reconnect ?? {}) };
+    if (this.reconnectAttempt >= policy.maxAttempts) return;
+
+    this.reconnectAttempt += 1;
+    const exponential = Math.min(
+      policy.maxDelayMs,
+      policy.initialDelayMs * 2 ** (this.reconnectAttempt - 1)
+    );
+    const random = this.config.random ?? Math.random;
+    const jitter = exponential * policy.jitterRatio * (random() * 2 - 1);
+    const delayMs = Math.max(0, Math.round(exponential + jitter));
+    this.state = 'reconnecting';
+    this.config.onReconnectScheduled?.(this.reconnectAttempt, delayMs);
+    const schedule = this.config.setTimeout ?? globalThis.setTimeout;
+    this.reconnectTimer = schedule(() => this.openSocket(), delayMs);
+  }
+
+  private clearReconnect(): void {
+    if (!this.reconnectTimer) return;
+    const cancel = this.config.clearTimeout ?? globalThis.clearTimeout;
+    cancel(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
   private async defaultHandle(msg: ProtocolMessage): Promise<void> {
     if (msg.kind === 'task.dispatch') {
-      const driver = this.driversById.get(msg.task.driver);
-      if (!driver) {
-        this.send({
-          kind: 'task.failed',
-          run_id: msg.run_id,
-          reason: `No driver registered for '${msg.task.driver}'`,
-          recoverable: false,
-        });
+      if (
+        this.completedDispatches.has(msg.idempotency_key) ||
+        this.inFlightDispatches.has(msg.idempotency_key)
+      ) {
         return;
       }
-      for await (const outbound of driver.dispatch(msg.task, {
-        run_id: msg.run_id,
-        idempotency_key: msg.idempotency_key,
-      })) {
-        this.send(outbound);
-      }
+      const execution = this.executeDispatch(msg).finally(() => {
+        this.inFlightDispatches.delete(msg.idempotency_key);
+      });
+      this.inFlightDispatches.set(msg.idempotency_key, execution);
+      await execution;
       return;
     }
 
     if (msg.kind === 'task.cancel') {
-      const drivers = Array.from(this.driversById.values());
-      await Promise.all(drivers.map((d) => d.cancel(msg.run_id).catch(() => undefined)));
+      await Promise.all(
+        Array.from(this.driversById.values()).map((driver) =>
+          driver.cancel(msg.run_id).catch(() => undefined)
+        )
+      );
+    }
+  }
+
+  private async executeDispatch(
+    msg: Extract<ServerToPeerMessage, { kind: 'task.dispatch' }>
+  ): Promise<void> {
+    const driver = this.driversById.get(msg.task.driver);
+    if (!driver) {
+      this.sendSafely({
+        kind: 'task.failed',
+        run_id: msg.run_id,
+        reason: `No driver registered for '${msg.task.driver}'`,
+        recoverable: false,
+      });
       return;
+    }
+
+    try {
+      for await (const outbound of driver.dispatch(msg.task, {
+        run_id: msg.run_id,
+        idempotency_key: msg.idempotency_key,
+      })) {
+        if (outbound.kind === 'task.completed') {
+          this.rememberCompleted(msg.idempotency_key, msg.run_id);
+          this.pendingReceipts.set(msg.run_id, outbound);
+          try {
+            this.send(outbound);
+            this.pendingReceipts.delete(msg.run_id);
+          } catch (error) {
+            this.config.onError?.(error);
+            await this.postReceipt(outbound);
+          }
+        } else {
+          this.sendSafely(outbound);
+        }
+      }
+    } catch (error) {
+      this.config.onError?.(error);
+      this.sendSafely({
+        kind: 'task.failed',
+        run_id: msg.run_id,
+        reason: error instanceof Error ? error.message : String(error),
+        recoverable: true,
+      });
+    }
+  }
+
+  private sendSafely(message: PeerToServerMessage): void {
+    try {
+      this.send(message);
+    } catch (error) {
+      this.config.onError?.(error);
+    }
+  }
+
+  private rememberCompleted(idempotencyKey: string, runId: string): void {
+    this.completedDispatches.set(idempotencyKey, runId);
+    while (this.completedDispatches.size > IDEMPOTENCY_CACHE_LIMIT) {
+      const oldest = this.completedDispatches.keys().next().value as
+        | string
+        | undefined;
+      if (!oldest) break;
+      this.completedDispatches.delete(oldest);
+    }
+  }
+
+  private async flushPendingReceipts(): Promise<void> {
+    for (const receipt of this.pendingReceipts.values()) {
+      await this.postReceipt(receipt);
+    }
+  }
+
+  private async postReceipt(receipt: TaskCompletedMessage): Promise<void> {
+    const request = this.config.fetch ?? globalThis.fetch;
+    if (!request) return;
+    const base = this.config.baseUrl.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:');
+    const url = new URL(
+      `/api/v1/runs/${encodeURIComponent(receipt.run_id)}/receipt`,
+      base
+    );
+    try {
+      const response = await request(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': receipt.run_id,
+        },
+        body: JSON.stringify({
+          provider: receipt.provider,
+          source_sub_type: receipt.source_sub_type,
+          source_driver: receipt.source_driver,
+          started_at: receipt.started_at,
+          first_response_at: receipt.first_response_at ?? null,
+          completed_at: receipt.completed_at,
+          tokens_used: receipt.tokens_used,
+          cost_estimate_cents: receipt.cost_estimate_cents,
+          saved_estimate_cents: receipt.saved_estimate_cents ?? 0,
+          outcome_kind: receipt.outcome_kind,
+          metadata: { recovered_from: 'gateway_socket' },
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`receipt recovery failed with ${response.status}`);
+      }
+      this.pendingReceipts.delete(receipt.run_id);
+    } catch (error) {
+      this.config.onError?.(error);
     }
   }
 }
