@@ -10,8 +10,10 @@
 import type {
   DispatchableTask,
   PeerToServerMessage,
+  ProtocolVersion,
   TaskDriver,
 } from './protocol.js';
+import type { ExecutionEnvelope } from './execution.js';
 
 export type DriverStatus = {
   installed: boolean;
@@ -46,7 +48,12 @@ export interface Driver {
    */
   dispatch(
     task: DispatchableTask,
-    context: { run_id: string; idempotency_key: string }
+    context: {
+      run_id: string;
+      idempotency_key: string;
+      protocol_version: ProtocolVersion;
+      execution_envelope?: ExecutionEnvelope;
+    }
   ): AsyncIterable<PeerToServerMessage>;
 
   /** Cancel an in-flight run. Idempotent. */

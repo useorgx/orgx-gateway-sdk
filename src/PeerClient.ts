@@ -8,11 +8,20 @@
 
 import type { Driver } from './Driver.js';
 import {
+  validateExecutionEnvelope,
+  validateExecutionResult,
+} from './execution.js';
+import {
+  isTaskResult,
+  isV2TaskDispatch,
   PROTOCOL_VERSION,
   type PeerToServerMessage,
+  type ProtocolVersion,
   type ProtocolMessage,
   type ServerToPeerMessage,
   type TaskCompletedMessage,
+  type TaskDispatchMessage,
+  type TaskResultMessage,
 } from './protocol.js';
 
 export type WebSocketEvent = { code?: number; reason?: string; data?: unknown };
@@ -43,6 +52,8 @@ export type PeerClientConfig = {
   pluginId: string;
   /** Which drivers this peer registers. Typically a single-element array. */
   drivers: Driver[];
+  /** Defaults to v1 until the connected gateway advertises v2 support. */
+  protocolVersion?: ProtocolVersion;
   /** Optional installation identity advertised to the gateway. */
   installationId?: string;
   /** Called instead of the default task router when supplied. */
@@ -79,6 +90,7 @@ const DEFAULT_RECONNECT = {
 } as const;
 const IDEMPOTENCY_CACHE_LIMIT = 1_000;
 const NON_RETRYABLE_CLOSE_CODES = new Set([1000, 4000, 4001, 4003, 4401, 4403]);
+type TerminalReceiptMessage = TaskCompletedMessage | TaskResultMessage;
 
 export class PeerClient {
   private ws: WebSocketLike | null = null;
@@ -86,7 +98,7 @@ export class PeerClient {
   private readonly driversById = new Map<string, Driver>();
   private readonly completedDispatches = new Map<string, string>();
   private readonly inFlightDispatches = new Map<string, Promise<void>>();
-  private readonly pendingReceipts = new Map<string, TaskCompletedMessage>();
+  private readonly pendingReceipts = new Map<string, TerminalReceiptMessage>();
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private manualClose = false;
@@ -142,7 +154,7 @@ export class PeerClient {
     }
 
     const protocols = [
-      `orgx.v${PROTOCOL_VERSION}`,
+      `orgx.v${this.config.protocolVersion ?? PROTOCOL_VERSION}`,
       `bearer.${this.config.apiKey}`,
     ];
     const factory =
@@ -243,7 +255,7 @@ export class PeerClient {
   }
 
   private async executeDispatch(
-    msg: Extract<ServerToPeerMessage, { kind: 'task.dispatch' }>
+    msg: TaskDispatchMessage
   ): Promise<void> {
     const driver = this.driversById.get(msg.task.driver);
     if (!driver) {
@@ -256,34 +268,99 @@ export class PeerClient {
       return;
     }
 
+    const protocolVersion = isV2TaskDispatch(msg) ? 2 : 1;
+    if (isV2TaskDispatch(msg)) {
+      try {
+        validateExecutionEnvelope(msg.execution_envelope);
+        if (
+          msg.execution_envelope.runId !== msg.run_id ||
+          msg.execution_envelope.idempotencyKey !== msg.idempotency_key
+        ) {
+          throw new Error('dispatch identity does not match execution envelope');
+        }
+      } catch (error) {
+        this.sendProtocolFailure(msg.run_id, error);
+        return;
+      }
+    }
+
+    let terminalResult: TerminalReceiptMessage | null = null;
     try {
       for await (const outbound of driver.dispatch(msg.task, {
         run_id: msg.run_id,
         idempotency_key: msg.idempotency_key,
+        protocol_version: protocolVersion,
+        ...(isV2TaskDispatch(msg)
+          ? { execution_envelope: msg.execution_envelope }
+          : {}),
       })) {
-        if (outbound.kind === 'task.completed') {
-          this.rememberCompleted(msg.idempotency_key, msg.run_id);
-          this.pendingReceipts.set(msg.run_id, outbound);
-          try {
-            this.send(outbound);
-            this.pendingReceipts.delete(msg.run_id);
-          } catch (error) {
-            this.config.onError?.(error);
-            await this.postReceipt(outbound);
+        if (outbound.kind === 'task.completed' || isTaskResult(outbound)) {
+          if (terminalResult) {
+            this.sendProtocolFailure(
+              msg.run_id,
+              new Error('driver emitted multiple terminal results')
+            );
+            return;
           }
+          if (isV2TaskDispatch(msg) !== isTaskResult(outbound)) {
+            this.sendProtocolFailure(
+              msg.run_id,
+              new Error(`protocol v${protocolVersion} terminal result mismatch`)
+            );
+            return;
+          }
+          if (isTaskResult(outbound) && isV2TaskDispatch(msg)) {
+            try {
+              if (outbound.run_id !== msg.run_id) {
+                throw new Error('terminal result run id mismatch');
+              }
+              validateExecutionResult(
+                outbound.execution_result,
+                msg.execution_envelope
+              );
+            } catch (error) {
+              this.sendProtocolFailure(msg.run_id, error);
+              return;
+            }
+          }
+          terminalResult = outbound;
         } else {
           this.sendSafely(outbound);
         }
       }
+      if (!terminalResult) {
+        this.sendProtocolFailure(
+          msg.run_id,
+          new Error('driver ended without a terminal result')
+        );
+        return;
+      }
+      this.rememberCompleted(msg.idempotency_key, msg.run_id);
+      this.pendingReceipts.set(msg.run_id, terminalResult);
+      try {
+        this.send(terminalResult);
+        this.pendingReceipts.delete(msg.run_id);
+      } catch (error) {
+        this.config.onError?.(error);
+        await this.postReceipt(terminalResult);
+      }
     } catch (error) {
       this.config.onError?.(error);
-      this.sendSafely({
-        kind: 'task.failed',
-        run_id: msg.run_id,
-        reason: error instanceof Error ? error.message : String(error),
-        recoverable: true,
-      });
+      this.sendProtocolFailure(msg.run_id, error, true);
     }
+  }
+
+  private sendProtocolFailure(
+    runId: string,
+    error: unknown,
+    recoverable = false
+  ): void {
+    this.sendSafely({
+      kind: 'task.failed',
+      run_id: runId,
+      reason: error instanceof Error ? error.message : String(error),
+      recoverable,
+    });
   }
 
   private sendSafely(message: PeerToServerMessage): void {
@@ -311,7 +388,7 @@ export class PeerClient {
     }
   }
 
-  private async postReceipt(receipt: TaskCompletedMessage): Promise<void> {
+  private async postReceipt(receipt: TerminalReceiptMessage): Promise<void> {
     const request = this.config.fetch ?? globalThis.fetch;
     if (!request) return;
     const base = this.config.baseUrl.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:');
@@ -327,19 +404,7 @@ export class PeerClient {
           'Content-Type': 'application/json',
           'Idempotency-Key': receipt.run_id,
         },
-        body: JSON.stringify({
-          provider: receipt.provider,
-          source_sub_type: receipt.source_sub_type,
-          source_driver: receipt.source_driver,
-          started_at: receipt.started_at,
-          first_response_at: receipt.first_response_at ?? null,
-          completed_at: receipt.completed_at,
-          tokens_used: receipt.tokens_used,
-          cost_estimate_cents: receipt.cost_estimate_cents,
-          saved_estimate_cents: receipt.saved_estimate_cents ?? 0,
-          outcome_kind: receipt.outcome_kind,
-          metadata: { recovered_from: 'gateway_socket' },
-        }),
+        body: JSON.stringify(receiptBody(receipt)),
       });
       if (!response.ok) {
         throw new Error(`receipt recovery failed with ${response.status}`);
@@ -349,4 +414,30 @@ export class PeerClient {
       this.config.onError?.(error);
     }
   }
+}
+
+function receiptBody(receipt: TerminalReceiptMessage): Record<string, unknown> {
+  if (receipt.kind === 'task.result') {
+    return {
+      protocol_version: 2,
+      execution_result: receipt.execution_result,
+      provider_attribution: receipt.provider_attribution ?? null,
+      outcome_kind: receipt.execution_result.disposition,
+      completed_at: receipt.execution_result.completedAt,
+      metadata: { recovered_from: 'gateway_socket' },
+    };
+  }
+  return {
+    provider: receipt.provider,
+    source_sub_type: receipt.source_sub_type,
+    source_driver: receipt.source_driver,
+    started_at: receipt.started_at,
+    first_response_at: receipt.first_response_at ?? null,
+    completed_at: receipt.completed_at,
+    tokens_used: receipt.tokens_used,
+    cost_estimate_cents: receipt.cost_estimate_cents,
+    saved_estimate_cents: receipt.saved_estimate_cents ?? 0,
+    outcome_kind: receipt.outcome_kind,
+    metadata: { recovered_from: 'gateway_socket' },
+  };
 }
