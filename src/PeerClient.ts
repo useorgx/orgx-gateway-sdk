@@ -2,8 +2,8 @@
  * Durable client for one OrgX gateway peer.
  *
  * The client owns four guarantees that every editor integration needs:
- * bounded reconnect, dispatch idempotency, cancellation, and an HTTP receipt
- * fallback when a completion cannot be delivered over the socket.
+ * capped-backoff reconnect, dispatch idempotency, cancellation, and an HTTP
+ * receipt fallback when a completion cannot be delivered over the socket.
  */
 
 import type { Driver } from './Driver.js';
@@ -27,6 +27,7 @@ export interface WebSocketLike {
 }
 
 export type ReconnectPolicy = {
+  /** Defaults to continuous retry. Set a finite value for short-lived clients. */
   maxAttempts?: number;
   initialDelayMs?: number;
   maxDelayMs?: number;
@@ -68,7 +69,10 @@ export type PeerClientState =
   | 'closed';
 
 const DEFAULT_RECONNECT = {
-  maxAttempts: 8,
+  // Local peers are supervised daemons. A normal production deploy can last
+  // longer than eight attempts, so keep retrying with a capped delay until the
+  // gateway returns or the client is stopped explicitly.
+  maxAttempts: Number.POSITIVE_INFINITY,
   initialDelayMs: 500,
   maxDelayMs: 30_000,
   jitterRatio: 0.2,

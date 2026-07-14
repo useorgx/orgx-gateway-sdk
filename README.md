@@ -35,6 +35,11 @@ const client = new PeerClient({
 client.connect();
 ```
 
+Peer clients retry transient network and server-restart closures continuously
+with exponential backoff capped at 30 seconds. Set `reconnect.maxAttempts` when
+a short-lived integration needs a finite retry window; authentication and
+protocol close codes remain non-retryable.
+
 ## Status
 
 Alpha — shipped as part of the Sovereign Execution initiative (993cabeb).
