@@ -126,6 +126,42 @@ describe('PeerClient', () => {
     assert.deepEqual(delays, [100, 200]);
   });
 
+  it('keeps daemon peers retrying beyond the legacy eight-attempt window', () => {
+    const sockets = [];
+    const delays = [];
+    const timers = [];
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      drivers: [createDriver({ count: 0 })],
+      reconnect: { jitterRatio: 0 },
+      webSocketFactory() {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      setTimeout(fn, delay) {
+        delays.push(delay);
+        timers.push(fn);
+        return timers.length;
+      },
+      clearTimeout() {},
+    });
+
+    client.connect();
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      sockets[attempt].emit('close', { code: 1001, reason: 'server deploy' });
+      assert.equal(timers.length, 1, `attempt ${attempt + 1} schedules a retry`);
+      timers.shift()();
+    }
+
+    assert.deepEqual(delays, [500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000]);
+    assert.equal(client.currentState, 'reconnecting');
+    assert.equal(sockets.length, 10);
+  });
+
   it('deduplicates repeated dispatch idempotency keys', async () => {
     const socket = new FakeSocket();
     const counter = { count: 0 };
