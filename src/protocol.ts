@@ -1,11 +1,17 @@
 /**
- * OrgX Gateway Protocol v1 — wire message types.
+ * OrgX Gateway Protocol v1/v2 — wire message types.
  *
  * Each plugin peer implements this protocol directly against OrgX server.
  * See PROTOCOL.md for the wire spec; this file is the TypeScript mirror.
  */
 
+import type { ExecutionEnvelope, ExecutionResult } from './execution.js';
+
+/** Backward-compatible default until gateway servers advertise v2. */
 export const PROTOCOL_VERSION = 1 as const;
+export const LATEST_PROTOCOL_VERSION = 2 as const;
+export const SUPPORTED_PROTOCOL_VERSIONS = [1, 2] as const;
+export type ProtocolVersion = (typeof SUPPORTED_PROTOCOL_VERSIONS)[number];
 
 // ─── Dispatchable task ─────────────────────────────────────────────────────
 
@@ -21,13 +27,27 @@ export type DispatchableTask = {
 
 // ─── Server → Peer ─────────────────────────────────────────────────────────
 
-export type TaskDispatchMessage = {
+export type TaskDispatchV1Message = {
   kind: 'task.dispatch';
   run_id: string;
   task: DispatchableTask;
   idempotency_key: string;
   timeout_seconds: number;
 };
+
+export type TaskDispatchV2Message = {
+  kind: 'task.dispatch';
+  protocol_version: 2;
+  run_id: string;
+  task: DispatchableTask;
+  execution_envelope: ExecutionEnvelope;
+  idempotency_key: string;
+  timeout_seconds: number;
+};
+
+export type TaskDispatchMessage =
+  | TaskDispatchV1Message
+  | TaskDispatchV2Message;
 
 export type TaskCancelMessage = {
   kind: 'task.cancel';
@@ -97,6 +117,21 @@ export type TaskCompletedMessage = {
   saved_estimate_cents?: number;
 };
 
+export type TaskResultMessage = {
+  kind: 'task.result';
+  protocol_version: 2;
+  run_id: string;
+  execution_result: ExecutionResult;
+  provider_attribution?: {
+    provider: Provider;
+    source_sub_type: SourceSubType;
+    source_driver: TaskDriver;
+    tokens_used: number;
+    cost_estimate_cents: number;
+    saved_estimate_cents?: number;
+  };
+};
+
 export type TaskFailedMessage = {
   kind: 'task.failed';
   run_id: string;
@@ -109,7 +144,20 @@ export type PeerToServerMessage =
   | TaskStepMessage
   | TaskDeviationMessage
   | TaskCompletedMessage
+  | TaskResultMessage
   | TaskFailedMessage;
+
+export function isV2TaskDispatch(
+  message: TaskDispatchMessage
+): message is TaskDispatchV2Message {
+  return 'protocol_version' in message && message.protocol_version === 2;
+}
+
+export function isTaskResult(
+  message: PeerToServerMessage
+): message is TaskResultMessage {
+  return message.kind === 'task.result';
+}
 
 // ─── Discriminated union ───────────────────────────────────────────────────
 

@@ -1,6 +1,8 @@
 # @useorgx/orgx-gateway-sdk
 
-Client SDK for OrgX Gateway Protocol v1.
+Client SDK for OrgX Gateway Protocol v1/v2. Protocol v2 adds an opt-in,
+proof-carrying execution boundary; v1 remains the default during the
+compatibility window.
 
 License: MIT.
 

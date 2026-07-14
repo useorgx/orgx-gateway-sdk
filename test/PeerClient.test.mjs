@@ -49,6 +49,92 @@ function dispatch(runId = 'run-1', key = 'dispatch-1') {
   };
 }
 
+const digest = (character) => `sha256:${character.repeat(64)}`;
+
+function executionEnvelope(runId = 'run-v2', key = 'dispatch-v2') {
+  return {
+    schemaVersion: '1.0.0',
+    producer: {
+      actor: { type: 'service', id: 'mission-runtime' },
+      service: 'mission-runtime',
+      serviceVersion: '1.0.0',
+    },
+    id: 'envelope-v2',
+    runId,
+    attemptId: 'attempt-v2',
+    idempotencyKey: key,
+    workRef: {
+      workspaceId: 'workspace-1',
+      initiativeId: 'initiative-1',
+      taskId: 'task-1',
+    },
+    missionId: 'mission-1',
+    missionContractDigest: digest('1'),
+    nodeId: 'node-1',
+    contextManifestDigest: digest('2'),
+    capabilityLeaseId: 'lease-1',
+    capabilityLeaseDigest: digest('3'),
+    runtimeProfileDigest: digest('4'),
+    qualityBarVersionId: 'quality-1',
+    skillVersionDigests: [digest('5')],
+    toolManifestDigests: [digest('6')],
+    budget: {
+      modelCostMicros: '1000',
+      toolCostMicros: '1000',
+      humanMinutes: 0,
+    },
+    requestedAt: '2026-07-14T22:00:00.000Z',
+    digest: digest('7'),
+  };
+}
+
+function executionResult(envelope = executionEnvelope()) {
+  return {
+    schemaVersion: '1.0.0',
+    producer: {
+      actor: { type: 'agent', id: 'engineering-agent' },
+      service: 'orgx-codex-plugin',
+      serviceVersion: '1.0.0',
+    },
+    id: 'result-v2',
+    envelopeId: envelope.id,
+    envelopeDigest: envelope.digest,
+    workRef: envelope.workRef,
+    missionId: envelope.missionId,
+    nodeId: envelope.nodeId,
+    runId: envelope.runId,
+    attemptId: envelope.attemptId,
+    disposition: 'technically_complete',
+    receiptRefs: [{ kind: 'run', id: envelope.runId }],
+    artifactRefs: [],
+    decisionRefs: [],
+    blockerRefs: [],
+    proofPacketRef: { id: 'proof-1', digest: digest('8') },
+    outcomeRefs: [],
+    costs: {
+      modelMicros: '100',
+      toolMicros: '0',
+      infrastructureMicros: '0',
+      humanLaborMicros: '0',
+      totalMicros: '100',
+    },
+    completedAt: '2026-07-14T22:01:00.000Z',
+    digest: digest('9'),
+  };
+}
+
+function v2Dispatch(runId = 'run-v2', key = 'dispatch-v2') {
+  return {
+    kind: 'task.dispatch',
+    protocol_version: 2,
+    run_id: runId,
+    idempotency_key: key,
+    timeout_seconds: 30,
+    task: { title: 'Proof-carrying probe', driver: 'codex' },
+    execution_envelope: executionEnvelope(runId, key),
+  };
+}
+
 function createDriver(counter) {
   return {
     id: 'codex',
@@ -62,6 +148,30 @@ function createDriver(counter) {
       counter.count += 1;
       yield { kind: 'task.started', run_id: context.run_id, started_at: 'now' };
       yield completed(context.run_id);
+    },
+    async cancel() {},
+  };
+}
+
+function createV2Driver(contexts, mutateResult = (result) => result) {
+  return {
+    id: 'codex',
+    async detect() {
+      return { installed: true, authenticated: true };
+    },
+    async probe() {
+      return { subscription_active: true, session_alive: true };
+    },
+    async *dispatch(_task, context) {
+      contexts.push(context);
+      const result = mutateResult(executionResult(context.execution_envelope));
+      yield { kind: 'task.started', run_id: context.run_id, started_at: 'now' };
+      yield {
+        kind: 'task.result',
+        protocol_version: 2,
+        run_id: context.run_id,
+        execution_result: result,
+      };
     },
     async cancel() {},
   };
@@ -90,6 +200,100 @@ describe('PeerClient', () => {
     assert.equal(url.searchParams.get('installation_id'), 'install-1');
     assert.equal(url.searchParams.get('drivers'), 'codex');
     assert.deepEqual(opened.protocols, ['orgx.v1', 'bearer.oxk_test']);
+  });
+
+  it('opts into v2 explicitly and forwards the proof-carrying envelope', async () => {
+    let opened;
+    const socket = new FakeSocket();
+    const contexts = [];
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      protocolVersion: 2,
+      drivers: [createV2Driver(contexts)],
+      webSocketFactory(url, protocols) {
+        opened = { url, protocols };
+        return socket;
+      },
+    });
+    client.connect();
+    socket.emit('open');
+    socket.emit('message', { data: JSON.stringify(v2Dispatch()) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(opened.protocols, ['orgx.v2', 'bearer.oxk_test']);
+    assert.equal(contexts[0].protocol_version, 2);
+    assert.equal(contexts[0].execution_envelope.runtimeProfileDigest, digest('4'));
+    assert.equal(socket.sent.at(-1).kind, 'task.result');
+  });
+
+  it('fails closed when v2 dispatch or terminal identity does not match', async () => {
+    const socket = new FakeSocket();
+    const contexts = [];
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      protocolVersion: 2,
+      drivers: [
+        createV2Driver(contexts, (result) => ({
+          ...result,
+          envelopeDigest: digest('a'),
+        })),
+      ],
+      webSocketFactory: () => socket,
+    });
+    client.connect();
+    socket.emit('open');
+    const invalidDispatch = v2Dispatch('run-invalid', 'dispatch-invalid');
+    invalidDispatch.execution_envelope.idempotencyKey = 'different-key';
+    socket.emit('message', { data: JSON.stringify(invalidDispatch) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(contexts.length, 0);
+    assert.match(socket.sent.at(-1).reason, /dispatch identity/);
+
+    socket.emit('message', { data: JSON.stringify(v2Dispatch()) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(contexts.length, 1);
+    assert.match(socket.sent.at(-1).reason, /does not match its envelope/);
+  });
+
+  it('does not publish a v2 result until exactly one terminal value is proven', async () => {
+    const socket = new FakeSocket();
+    const driver = createV2Driver([]);
+    driver.dispatch = async function* (_task, context) {
+      const result = executionResult(context.execution_envelope);
+      yield {
+        kind: 'task.result',
+        protocol_version: 2,
+        run_id: context.run_id,
+        execution_result: result,
+      };
+      yield {
+        kind: 'task.result',
+        protocol_version: 2,
+        run_id: context.run_id,
+        execution_result: result,
+      };
+    };
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      protocolVersion: 2,
+      drivers: [driver],
+      webSocketFactory: () => socket,
+    });
+    client.connect();
+    socket.emit('open');
+    socket.emit('message', { data: JSON.stringify(v2Dispatch()) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(socket.sent.some((message) => message.kind === 'task.result'), false);
+    assert.equal(socket.sent.at(-1).kind, 'task.failed');
+    assert.match(socket.sent.at(-1).reason, /multiple terminal results/);
   });
 
   it('reconnects with bounded exponential backoff but not after protocol mismatch', () => {
@@ -210,5 +414,35 @@ describe('PeerClient', () => {
     assert.match(requests[0].url, /\/api\/v1\/runs\/run-recovery\/receipt$/);
     assert.equal(requests[0].init.headers.Authorization, 'Bearer oxk_test');
     assert.equal(JSON.parse(requests[0].init.body).source_driver, 'codex');
+  });
+
+  it('recovers a v2 terminal result with the canonical result intact', async () => {
+    const socket = new FakeSocket();
+    const requests = [];
+    socket.send = () => {
+      throw new Error('socket dropped');
+    };
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      protocolVersion: 2,
+      drivers: [createV2Driver([])],
+      webSocketFactory: () => socket,
+      async fetch(url, init) {
+        requests.push({ url: String(url), init });
+        return new Response('{}', { status: 201 });
+      },
+    });
+    client.connect();
+    socket.emit('open');
+    socket.emit('message', { data: JSON.stringify(v2Dispatch()) });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    const body = JSON.parse(requests[0].init.body);
+    assert.equal(body.protocol_version, 2);
+    assert.equal(body.execution_result.envelopeDigest, digest('7'));
+    assert.equal(body.execution_result.workRef.taskId, 'task-1');
   });
 });
