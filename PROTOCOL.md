@@ -43,8 +43,12 @@ Every frame is a single JSON object with a `kind` discriminator. See `src/protoc
 - `task.completed` — final outcome + token counts + provider attribution
 - `task.failed` — unrecoverable (or recoverable + retryable) error
 - `task.result` (v2) — the single typed terminal result carrying the canonical
-  `ExecutionResult`, including work lineage, receipts, artifacts, proof,
-  outcomes, costs, and disposition.
+  OrgX-issued `ExecutionResult`, including work lineage, receipts, artifacts,
+  proof, outcomes, costs, and disposition.
+
+`task.finalize` is an SDK-local driver handoff, not a wire message. It carries
+the content-hashed finalization request and canonical action/verification
+source IDs. `PeerClient` posts it to OrgX before it can emit `task.result`.
 
 ## v2 proof-carrying boundary
 
@@ -56,15 +60,20 @@ task.dispatch
   task                    legacy human-readable driver input
   execution_envelope      canonical authority/context/budget/proof contract
 
-task.result
-  execution_result        canonical terminal receipts/artifacts/outcomes/costs
+driver task.finalize      local source references; never sent over WebSocket
+  ↓ POST /api/v1/runs/:run_id/finalize
+OrgX Proof Plane          resolves sources, signs proof, issues result
+  ↓
+task.result               canonical terminal receipts/artifacts/outcomes/costs
 ```
 
 The peer rejects v2 dispatches when the top-level run or idempotency identity
-does not match the envelope. It also rejects terminal results whose run,
-attempt, envelope digest, work lineage, proof requirements, or outcome
-requirements do not match the dispatch. A v2 driver must emit exactly one
-`task.result`; legacy `task.completed` remains the v1 terminal message.
+does not match the envelope. A v2 driver must emit exactly one local
+`task.finalize`; duplicate terminal candidates are rejected before any
+finalization request is sent. The client validates the finalization request,
+the OrgX-issued response digest, proof reference, result digest, and envelope
+lineage before emitting `task.result`. Legacy `task.completed` remains the v1
+terminal message.
 
 ## Idempotency
 

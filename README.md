@@ -42,6 +42,19 @@ with exponential backoff capped at 30 seconds. Set `reconnect.maxAttempts` when
 a short-lived integration needs a finite retry window; authentication and
 protocol close codes remain non-retryable.
 
+## Proof-carrying v2 finalization
+
+In v2, a driver does not construct its own successful `ExecutionResult`. It
+yields one SDK-local `task.finalize` message containing a content-hashed
+`ExecutionFinalizationRequest` with persisted action and verification source
+IDs. `PeerClient` calls OrgX's idempotent finalization endpoint, validates the
+signed response and envelope lineage, and only then emits `task.result`.
+
+This keeps the producer/verifier boundary explicit: plugins report evidence
+sources; the OrgX control plane resolves those sources, builds the Proof
+Packet, and issues the terminal result. Protocol v1 remains the default until
+a plugin can supply real canonical source IDs.
+
 ## Status
 
 Alpha — shipped as part of the Sovereign Execution initiative (993cabeb).

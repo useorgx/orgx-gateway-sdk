@@ -2,6 +2,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { PeerClient } from '../dist/PeerClient.js';
+import {
+  buildExecutionFinalizationRequest,
+  computeContractDigest,
+} from '../dist/execution.js';
 
 class FakeSocket {
   listeners = new Map();
@@ -24,6 +28,14 @@ class FakeSocket {
   close(code = 1000, reason = '') {
     this.emit('close', { code, reason });
   }
+}
+
+async function waitFor(predicate, label) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`timed out waiting for ${label}`);
 }
 
 const completed = (runId) => ({
@@ -88,12 +100,12 @@ function executionEnvelope(runId = 'run-v2', key = 'dispatch-v2') {
   };
 }
 
-function executionResult(envelope = executionEnvelope()) {
-  return {
+async function executionResult(envelope = executionEnvelope()) {
+  const unsigned = {
     schemaVersion: '1.0.0',
     producer: {
-      actor: { type: 'agent', id: 'engineering-agent' },
-      service: 'orgx-codex-plugin',
+      actor: { type: 'service', id: 'orgx-execution-finalizer' },
+      service: 'orgx-execution-finalizer',
       serviceVersion: '1.0.0',
     },
     id: 'result-v2',
@@ -119,7 +131,73 @@ function executionResult(envelope = executionEnvelope()) {
       totalMicros: '100',
     },
     completedAt: '2026-07-14T22:01:00.000Z',
-    digest: digest('9'),
+  };
+  return { ...unsigned, digest: await computeContractDigest(unsigned) };
+}
+
+function finalizationDraft(envelope = executionEnvelope()) {
+  return {
+    schemaVersion: '1.0.0',
+    producer: {
+      actor: { type: 'agent', id: 'engineering-agent' },
+      service: 'orgx-codex-plugin',
+      serviceVersion: '1.0.0',
+    },
+    id: `finalization-${envelope.runId}`,
+    resultId: `result-${envelope.runId}`,
+    envelopeId: envelope.id,
+    envelopeDigest: envelope.digest,
+    runId: envelope.runId,
+    attemptId: envelope.attemptId,
+    proofPacketId: `proof-${envelope.runId}`,
+    actionIds: ['action-1'],
+    verificationIds: ['verification-1'],
+    resolvedDependencies: [],
+    materialDecisions: [],
+    humanInterventions: [],
+    blockerRefs: [],
+    costs: {
+      modelMicros: '100',
+      toolMicros: '0',
+      infrastructureMicros: '0',
+      humanLaborMicros: '0',
+      totalMicros: '100',
+    },
+    completedAt: '2026-07-14T22:01:00.000Z',
+    requestedAt: '2026-07-14T22:01:00.000Z',
+    idempotencyKey: `finalize-${envelope.runId}`,
+  };
+}
+
+async function finalizationPayload(envelope, request) {
+  const result = await executionResult(envelope);
+  const unsigned = {
+    schemaVersion: '1.0.0',
+    producer: {
+      actor: { type: 'service', id: 'orgx-execution-finalizer' },
+      service: 'orgx-execution-finalizer',
+      serviceVersion: '1.0.0',
+    },
+    requestId: request.id,
+    requestDigest: request.digest,
+    executionResult: result,
+    proofPacketRef: result.proofPacketRef,
+    finalizedAt: '2026-07-14T22:01:01.000Z',
+  };
+  return {
+    response: { ...unsigned, digest: await computeContractDigest(unsigned) },
+    duplicate: false,
+  };
+}
+
+function finalizationFetch(envelope, requests = []) {
+  return async (url, init) => {
+    requests.push({ url: String(url), init });
+    const request = JSON.parse(String(init.body));
+    return new Response(
+      JSON.stringify(await finalizationPayload(envelope, request)),
+      { status: 201, headers: { 'Content-Type': 'application/json' } }
+    );
   };
 }
 
@@ -153,7 +231,7 @@ function createDriver(counter) {
   };
 }
 
-function createV2Driver(contexts, mutateResult = (result) => result) {
+function createV2Driver(contexts, mutateDraft = (draft) => draft) {
   return {
     id: 'codex',
     async detect() {
@@ -164,13 +242,15 @@ function createV2Driver(contexts, mutateResult = (result) => result) {
     },
     async *dispatch(_task, context) {
       contexts.push(context);
-      const result = mutateResult(executionResult(context.execution_envelope));
+      const request = await buildExecutionFinalizationRequest(
+        mutateDraft(finalizationDraft(context.execution_envelope)),
+        context.execution_envelope
+      );
       yield { kind: 'task.started', run_id: context.run_id, started_at: 'now' };
       yield {
-        kind: 'task.result',
-        protocol_version: 2,
+        kind: 'task.finalize',
         run_id: context.run_id,
-        execution_result: result,
+        execution_finalization_request: request,
       };
     },
     async cancel() {},
@@ -206,6 +286,7 @@ describe('PeerClient', () => {
     let opened;
     const socket = new FakeSocket();
     const contexts = [];
+    const requests = [];
     const client = new PeerClient({
       baseUrl: 'wss://useorgx.com',
       apiKey: 'oxk_test',
@@ -213,6 +294,7 @@ describe('PeerClient', () => {
       pluginId: 'orgx-codex-plugin',
       protocolVersion: 2,
       drivers: [createV2Driver(contexts)],
+      fetch: finalizationFetch(executionEnvelope(), requests),
       webSocketFactory(url, protocols) {
         opened = { url, protocols };
         return socket;
@@ -221,11 +303,59 @@ describe('PeerClient', () => {
     client.connect();
     socket.emit('open');
     socket.emit('message', { data: JSON.stringify(v2Dispatch()) });
-    await new Promise((resolve) => setImmediate(resolve));
+    await waitFor(
+      () => socket.sent.some((message) => message.kind === 'task.result'),
+      'OrgX-issued task result'
+    );
     assert.deepEqual(opened.protocols, ['orgx.v2', 'bearer.oxk_test']);
     assert.equal(contexts[0].protocol_version, 2);
     assert.equal(contexts[0].execution_envelope.runtimeProfileDigest, digest('4'));
+    assert.equal(requests.length, 1);
+    assert.match(requests[0].url, /\/api\/v1\/runs\/run-v2\/finalize$/);
+    assert.equal(requests[0].init.headers['Idempotency-Key'], 'finalize-run-v2');
+    assert.deepEqual(JSON.parse(requests[0].init.body).verificationIds, [
+      'verification-1',
+    ]);
     assert.equal(socket.sent.at(-1).kind, 'task.result');
+    assert.equal(
+      socket.sent.at(-1).execution_result.producer.actor.id,
+      'orgx-execution-finalizer'
+    );
+  });
+
+  it('fails closed when the finalizer response is not content-valid', async () => {
+    const socket = new FakeSocket();
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      protocolVersion: 2,
+      drivers: [createV2Driver([])],
+      webSocketFactory: () => socket,
+      async fetch(_url, init) {
+        const request = JSON.parse(String(init.body));
+        const payload = await finalizationPayload(executionEnvelope(), request);
+        payload.response.executionResult.digest = digest('f');
+        return new Response(JSON.stringify(payload), {
+          status: 201,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+    client.connect();
+    socket.emit('open');
+    socket.emit('message', { data: JSON.stringify(v2Dispatch()) });
+    await waitFor(
+      () => socket.sent.at(-1)?.kind === 'task.failed',
+      'invalid finalizer response rejection'
+    );
+    assert.equal(socket.sent.at(-1).recoverable, false);
+    assert.match(socket.sent.at(-1).reason, /issued execution result digest/);
+    assert.equal(
+      socket.sent.some((message) => message.kind === 'task.result'),
+      false
+    );
   });
 
   it('fails closed when v2 dispatch or terminal identity does not match', async () => {
@@ -262,20 +392,22 @@ describe('PeerClient', () => {
 
   it('does not publish a v2 result until exactly one terminal value is proven', async () => {
     const socket = new FakeSocket();
+    const requests = [];
     const driver = createV2Driver([]);
     driver.dispatch = async function* (_task, context) {
-      const result = executionResult(context.execution_envelope);
+      const request = await buildExecutionFinalizationRequest(
+        finalizationDraft(context.execution_envelope),
+        context.execution_envelope
+      );
       yield {
-        kind: 'task.result',
-        protocol_version: 2,
+        kind: 'task.finalize',
         run_id: context.run_id,
-        execution_result: result,
+        execution_finalization_request: request,
       };
       yield {
-        kind: 'task.result',
-        protocol_version: 2,
+        kind: 'task.finalize',
         run_id: context.run_id,
-        execution_result: result,
+        execution_finalization_request: request,
       };
     };
     const client = new PeerClient({
@@ -286,14 +418,19 @@ describe('PeerClient', () => {
       protocolVersion: 2,
       drivers: [driver],
       webSocketFactory: () => socket,
+      fetch: finalizationFetch(executionEnvelope(), requests),
     });
     client.connect();
     socket.emit('open');
     socket.emit('message', { data: JSON.stringify(v2Dispatch()) });
-    await new Promise((resolve) => setImmediate(resolve));
+    await waitFor(
+      () => socket.sent.at(-1)?.kind === 'task.failed',
+      'duplicate terminal rejection'
+    );
     assert.equal(socket.sent.some((message) => message.kind === 'task.result'), false);
     assert.equal(socket.sent.at(-1).kind, 'task.failed');
     assert.match(socket.sent.at(-1).reason, /multiple terminal results/);
+    assert.equal(requests.length, 0);
   });
 
   it('reconnects with bounded exponential backoff but not after protocol mismatch', () => {
@@ -432,15 +569,26 @@ describe('PeerClient', () => {
       webSocketFactory: () => socket,
       async fetch(url, init) {
         requests.push({ url: String(url), init });
+        if (String(url).endsWith('/finalize')) {
+          const request = JSON.parse(String(init.body));
+          return new Response(
+            JSON.stringify(
+              await finalizationPayload(executionEnvelope(), request)
+            ),
+            { status: 201, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
         return new Response('{}', { status: 201 });
       },
     });
     client.connect();
     socket.emit('open');
     socket.emit('message', { data: JSON.stringify(v2Dispatch()) });
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
-    const body = JSON.parse(requests[0].init.body);
+    await waitFor(() => requests.length === 2, 'finalization and receipt requests');
+    assert.equal(requests.length, 2);
+    assert.match(requests[0].url, /\/finalize$/);
+    assert.match(requests[1].url, /\/receipt$/);
+    const body = JSON.parse(requests[1].init.body);
     assert.equal(body.protocol_version, 2);
     assert.equal(body.execution_result.envelopeDigest, digest('7'));
     assert.equal(body.execution_result.workRef.taskId, 'task-1');
