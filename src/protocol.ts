@@ -5,7 +5,11 @@
  * See PROTOCOL.md for the wire spec; this file is the TypeScript mirror.
  */
 
-import type { ExecutionEnvelope, ExecutionResult } from './execution.js';
+import type {
+  ExecutionEnvelope,
+  ExecutionFinalizationRequest,
+  ExecutionResult,
+} from './execution.js';
 
 /** Backward-compatible default until gateway servers advertise v2. */
 export const PROTOCOL_VERSION = 1 as const;
@@ -132,6 +136,17 @@ export type TaskResultMessage = {
   };
 };
 
+/**
+ * SDK-local driver handoff. This is never written to the Gateway WebSocket.
+ * PeerClient exchanges it for the OrgX-issued TaskResultMessage.
+ */
+export type TaskFinalizationMessage = {
+  kind: 'task.finalize';
+  run_id: string;
+  execution_finalization_request: ExecutionFinalizationRequest;
+  provider_attribution?: TaskResultMessage['provider_attribution'];
+};
+
 export type TaskFailedMessage = {
   kind: 'task.failed';
   run_id: string;
@@ -147,6 +162,10 @@ export type PeerToServerMessage =
   | TaskResultMessage
   | TaskFailedMessage;
 
+export type DriverOutboundMessage =
+  | Exclude<PeerToServerMessage, TaskResultMessage>
+  | TaskFinalizationMessage;
+
 export function isV2TaskDispatch(
   message: TaskDispatchMessage
 ): message is TaskDispatchV2Message {
@@ -157,6 +176,12 @@ export function isTaskResult(
   message: PeerToServerMessage
 ): message is TaskResultMessage {
   return message.kind === 'task.result';
+}
+
+export function isTaskFinalization(
+  message: DriverOutboundMessage
+): message is TaskFinalizationMessage {
+  return message.kind === 'task.finalize';
 }
 
 // ─── Discriminated union ───────────────────────────────────────────────────

@@ -8,8 +8,8 @@
  */
 
 import type {
+  DriverOutboundMessage,
   DispatchableTask,
-  PeerToServerMessage,
   ProtocolVersion,
   TaskDriver,
 } from './protocol.js';
@@ -37,14 +37,17 @@ export interface Driver {
   detect(): Promise<DriverStatus>;
 
   /**
-   * Execute the task in the editor session. Yields PeerToServerMessage events
-   * that the peer will forward to the server over its WebSocket.
+   * Execute the task in the editor session. Progress and v1 messages are
+   * forwarded to the Gateway. For v2, the driver yields one SDK-local
+   * task.finalize request; PeerClient exchanges it for the OrgX-issued result.
    *
    * Implementations should yield (at minimum):
    *   - one task.started as the first message
    *   - task.step events as work progresses
    *   - task.deviation when skill rules match
-   *   - exactly one task.completed OR task.failed at the end
+   *   - v1: exactly one task.completed at the end
+   *   - v2: exactly one task.finalize with canonical source IDs at the end
+   *   - task.failed when execution cannot reach a terminal candidate
    */
   dispatch(
     task: DispatchableTask,
@@ -54,7 +57,7 @@ export interface Driver {
       protocol_version: ProtocolVersion;
       execution_envelope?: ExecutionEnvelope;
     }
-  ): AsyncIterable<PeerToServerMessage>;
+  ): AsyncIterable<DriverOutboundMessage>;
 
   /** Cancel an in-flight run. Idempotent. */
   cancel(run_id: string): Promise<void>;

@@ -29,13 +29,18 @@ OpenClaw's original "broker" role is deprecated. Its Claude-Code-specific dispat
 2. Server emits task.dispatch over the open WS.
 
 3. PeerClient.defaultHandle matches task.driver against the driver map and
-   awaits driver.dispatch(). Each yielded PeerToServerMessage is serialized
-   and sent back.
+   awaits driver.dispatch(). Progress messages are sent back directly. A v2
+   task.finalize handoff is held until the driver stream closes with exactly
+   one terminal candidate.
 
-4. Plugin posts execution_receipt via POST /api/v1/runs/:id/receipt (outside
-   the WS stream — the receipt survives connection drops).
+4. For v2, PeerClient posts the finalization request to
+   POST /api/v1/runs/:id/finalize. OrgX resolves the canonical sources, signs
+   the Proof Packet, and returns the only result the peer may publish.
 
-5. Plugin posts POST /api/v1/licenses/heartbeat weekly. An unlicensed or
+5. Plugin posts execution_receipt via POST /api/v1/runs/:id/receipt when the
+   WS send fails, so the issued result survives connection drops.
+
+6. Plugin posts POST /api/v1/licenses/heartbeat weekly. An unlicensed or
    stale plugin gets 402 on deviation endpoints and surfaces a degraded banner.
 ```
 

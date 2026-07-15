@@ -7,12 +7,13 @@
  */
 
 import type { Driver } from './Driver.js';
+import { validateExecutionEnvelope } from './execution.js';
 import {
-  validateExecutionEnvelope,
-  validateExecutionResult,
-} from './execution.js';
+  ExecutionFinalizationError,
+  postExecutionFinalization,
+} from './ExecutionFinalizer.js';
 import {
-  isTaskResult,
+  isTaskFinalization,
   isV2TaskDispatch,
   PROTOCOL_VERSION,
   type PeerToServerMessage,
@@ -21,6 +22,7 @@ import {
   type ServerToPeerMessage,
   type TaskCompletedMessage,
   type TaskDispatchMessage,
+  type TaskFinalizationMessage,
   type TaskResultMessage,
 } from './protocol.js';
 
@@ -285,6 +287,7 @@ export class PeerClient {
     }
 
     let terminalResult: TerminalReceiptMessage | null = null;
+    let finalization: TaskFinalizationMessage | null = null;
     try {
       for await (const outbound of driver.dispatch(msg.task, {
         run_id: msg.run_id,
@@ -294,38 +297,65 @@ export class PeerClient {
           ? { execution_envelope: msg.execution_envelope }
           : {}),
       })) {
-        if (outbound.kind === 'task.completed' || isTaskResult(outbound)) {
-          if (terminalResult) {
+        if (
+          outbound.kind === 'task.completed' ||
+          isTaskFinalization(outbound)
+        ) {
+          if (terminalResult || finalization) {
             this.sendProtocolFailure(
               msg.run_id,
               new Error('driver emitted multiple terminal results')
             );
             return;
           }
-          if (isV2TaskDispatch(msg) !== isTaskResult(outbound)) {
+          if (isV2TaskDispatch(msg) !== isTaskFinalization(outbound)) {
             this.sendProtocolFailure(
               msg.run_id,
               new Error(`protocol v${protocolVersion} terminal result mismatch`)
             );
             return;
           }
-          if (isTaskResult(outbound) && isV2TaskDispatch(msg)) {
-            try {
-              if (outbound.run_id !== msg.run_id) {
-                throw new Error('terminal result run id mismatch');
-              }
-              validateExecutionResult(
-                outbound.execution_result,
-                msg.execution_envelope
+          if (isTaskFinalization(outbound) && isV2TaskDispatch(msg)) {
+            if (outbound.run_id !== msg.run_id) {
+              this.sendProtocolFailure(
+                msg.run_id,
+                new Error('finalization request run id mismatch')
               );
-            } catch (error) {
-              this.sendProtocolFailure(msg.run_id, error);
               return;
             }
+            finalization = outbound;
+          } else if (outbound.kind === 'task.completed') {
+            terminalResult = outbound;
           }
-          terminalResult = outbound;
         } else {
           this.sendSafely(outbound);
+        }
+      }
+      if (finalization && isV2TaskDispatch(msg)) {
+        try {
+          const finalized = await postExecutionFinalization(
+            this.config,
+            msg.execution_envelope,
+            finalization.execution_finalization_request
+          );
+          terminalResult = {
+            kind: 'task.result',
+            protocol_version: 2,
+            run_id: msg.run_id,
+            execution_result: finalized.response.executionResult,
+            ...(finalization.provider_attribution
+              ? { provider_attribution: finalization.provider_attribution }
+              : {}),
+          };
+        } catch (error) {
+          this.sendProtocolFailure(
+            msg.run_id,
+            error,
+            error instanceof ExecutionFinalizationError
+              ? error.recoverable
+              : false
+          );
+          return;
         }
       }
       if (!terminalResult) {
