@@ -25,6 +25,9 @@ export type DispatchableTask = {
   title: string;
   description?: string;
   repo_path?: string;
+  workspace_id?: string;
+  initiative_id?: string;
+  workstream_id?: string;
   skill_ids?: string[];
   driver: TaskDriver;
 };
