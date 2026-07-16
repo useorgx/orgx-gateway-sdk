@@ -594,12 +594,18 @@ describe('PeerClient', () => {
     const invalidDispatch = v2Dispatch('run-invalid', 'dispatch-invalid');
     invalidDispatch.execution_envelope.idempotencyKey = 'different-key';
     socket.emit('message', { data: JSON.stringify(invalidDispatch) });
-    await new Promise((resolve) => setImmediate(resolve));
+    await waitFor(
+      () => socket.sent.at(-1)?.reason?.includes('dispatch identity'),
+      'dispatch identity rejection'
+    );
     assert.equal(contexts.length, 0);
     assert.match(socket.sent.at(-1).reason, /dispatch identity/);
 
     socket.emit('message', { data: JSON.stringify(v2Dispatch()) });
-    await new Promise((resolve) => setImmediate(resolve));
+    await waitFor(
+      () => socket.sent.at(-1)?.reason?.includes('does not match its envelope'),
+      'terminal identity rejection'
+    );
     assert.equal(contexts.length, 1);
     assert.match(socket.sent.at(-1).reason, /does not match its envelope/);
   });
