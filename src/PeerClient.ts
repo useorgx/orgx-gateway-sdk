@@ -108,6 +108,7 @@ export class PeerClient {
     ContinuationReceiptMessage
   >();
   private readonly handledAttentionResolutions = new Set<string>();
+  private readonly suspendedDispatches = new Map<string, string>();
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private manualClose = false;
@@ -242,7 +243,8 @@ export class PeerClient {
     if (msg.kind === 'task.dispatch') {
       if (
         this.completedDispatches.has(msg.idempotency_key) ||
-        this.inFlightDispatches.has(msg.idempotency_key)
+        this.inFlightDispatches.has(msg.idempotency_key) ||
+        this.suspendedDispatches.has(msg.idempotency_key)
       ) {
         return;
       }
@@ -332,6 +334,21 @@ export class PeerClient {
     let emitted = false;
     try {
       for await (const update of driver.resolveAttention(message)) {
+        if ('kind' in update) {
+          if (update.run_id !== message.run_id) {
+            throw new Error('continuation message run id mismatch');
+          }
+          if (isTaskFinalization(update)) {
+            throw new Error(
+              'proof finalization after attention is not supported by this SDK version'
+            );
+          }
+          this.sendSafely(update);
+          if (update.kind === 'task.completed') {
+            this.completeSuspendedRun(message.run_id);
+          }
+          continue;
+        }
         emitted = true;
         await this.deliverContinuationReceipt({
           ...baseReceipt,
@@ -394,6 +411,7 @@ export class PeerClient {
 
     let terminalResult: TerminalReceiptMessage | null = null;
     let finalization: TaskFinalizationMessage | null = null;
+    let suspended = false;
     try {
       for await (const outbound of driver.dispatch(msg.task, {
         run_id: msg.run_id,
@@ -403,11 +421,21 @@ export class PeerClient {
           ? { execution_envelope: msg.execution_envelope }
           : {}),
       })) {
-        if (
+        if (outbound.kind === 'task.suspended') {
+          if (terminalResult || finalization || suspended) {
+            this.sendProtocolFailure(
+              msg.run_id,
+              new Error('driver emitted multiple terminal or suspended results')
+            );
+            return;
+          }
+          suspended = true;
+          this.sendSafely(outbound);
+        } else if (
           outbound.kind === 'task.completed' ||
           isTaskFinalization(outbound)
         ) {
-          if (terminalResult || finalization) {
+          if (terminalResult || finalization || suspended) {
             this.sendProtocolFailure(
               msg.run_id,
               new Error('driver emitted multiple terminal results')
@@ -436,6 +464,10 @@ export class PeerClient {
         } else {
           this.sendSafely(outbound);
         }
+      }
+      if (suspended) {
+        this.suspendedDispatches.set(msg.idempotency_key, msg.run_id);
+        return;
       }
       if (finalization && isV2TaskDispatch(msg)) {
         try {
@@ -515,6 +547,14 @@ export class PeerClient {
         | undefined;
       if (!oldest) break;
       this.completedDispatches.delete(oldest);
+    }
+  }
+
+  private completeSuspendedRun(runId: string): void {
+    for (const [idempotencyKey, suspendedRunId] of this.suspendedDispatches) {
+      if (suspendedRunId !== runId) continue;
+      this.suspendedDispatches.delete(idempotencyKey);
+      this.rememberCompleted(idempotencyKey, runId);
     }
   }
 

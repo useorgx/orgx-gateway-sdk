@@ -44,6 +44,8 @@ Every frame is a single JSON object with a `kind` discriminator. See `src/protoc
 - `task.deviation` — a skill rule matched during execution
 - `task.completed` — final outcome + token counts + provider attribution
 - `task.failed` — unrecoverable (or recoverable + retryable) error
+- `task.suspended` (v3) — the local process stopped at a preserved attention
+  point; the run is neither failed nor complete
 - `task.result` (v2) — the single typed terminal result carrying the canonical
   OrgX-issued `ExecutionResult`, including work lineage, receipts, artifacts,
   proof, outcomes, costs, and disposition.
@@ -95,6 +97,7 @@ peer persists answer_received
 peer emits resuming
   -> CLI accepts the answer and work advances
 peer emits resumed (or resume_failed with a reason)
+  -> continued driver emits normal task.step and terminal task messages
 ```
 
 `attention.resolve` includes a stable decision ID, run ID, optional driver and

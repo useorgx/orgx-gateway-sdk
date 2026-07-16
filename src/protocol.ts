@@ -178,6 +178,14 @@ export type TaskFailedMessage = {
   recoverable: boolean;
 };
 
+export type TaskSuspendedMessage = {
+  kind: 'task.suspended';
+  run_id: string;
+  reason: 'attention';
+  session_handle?: string;
+  detail?: string;
+};
+
 export type ContinuationState =
   | 'answer_received'
   | 'resuming'
@@ -204,6 +212,7 @@ export type PeerToServerMessage =
   | TaskCompletedMessage
   | TaskResultMessage
   | TaskFailedMessage
+  | TaskSuspendedMessage
   | ContinuationReceiptMessage;
 
 export type DriverOutboundMessage =

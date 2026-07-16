@@ -466,6 +466,76 @@ describe('PeerClient', () => {
     );
   });
 
+  it('keeps a deferred task suspended and finishes it through continuation', async () => {
+    const socket = new FakeSocket();
+    let dispatches = 0;
+    const driver = createDriver({ count: 0 });
+    driver.dispatch = async function* (_task, context) {
+      dispatches += 1;
+      yield {
+        kind: 'task.started',
+        run_id: context.run_id,
+        started_at: '2026-07-15T21:00:00.000Z',
+        session_handle: 'session-1',
+      };
+      yield {
+        kind: 'task.suspended',
+        run_id: context.run_id,
+        reason: 'attention',
+        session_handle: 'session-1',
+      };
+    };
+    driver.resolveAttention = async function* (message) {
+      yield { state: 'resuming', session_handle: message.session_handle };
+      yield { state: 'resumed', session_handle: message.session_handle };
+      yield completed(message.run_id);
+    };
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      protocolVersion: 3,
+      drivers: [driver],
+      webSocketFactory: () => socket,
+      async fetch() {
+        return new Response('{}', { status: 200 });
+      },
+    });
+    client.connect();
+    socket.emit('open');
+    socket.emit('message', { data: JSON.stringify(dispatch()) });
+    await waitFor(
+      () => socket.sent.at(-1)?.kind === 'task.suspended',
+      'suspended task'
+    );
+
+    socket.emit('message', { data: JSON.stringify(dispatch()) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(dispatches, 1, 'suspended dispatch stays idempotent');
+
+    socket.emit('message', { data: JSON.stringify(attentionResolution()) });
+    await waitFor(
+      () => socket.sent.at(-1)?.kind === 'task.completed',
+      'continued task completion'
+    );
+    assert.deepEqual(
+      socket.sent.map((message) => message.kind),
+      [
+        'task.started',
+        'task.suspended',
+        'continuation.receipt',
+        'continuation.receipt',
+        'continuation.receipt',
+        'task.completed',
+      ]
+    );
+
+    socket.emit('message', { data: JSON.stringify(dispatch()) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(dispatches, 1, 'completed continuation stays idempotent');
+  });
+
   it('fails closed when the finalizer response is not content-valid', async () => {
     const socket = new FakeSocket();
     const client = new PeerClient({

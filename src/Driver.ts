@@ -84,7 +84,7 @@ export interface Driver {
    */
   resolveAttention?(
     message: AttentionResolutionMessage
-  ): AsyncIterable<DriverContinuationUpdate>;
+  ): AsyncIterable<DriverContinuationUpdate | DriverOutboundMessage>;
 
   /** Lightweight liveness probe; called periodically by the peer. */
   probe(): Promise<DriverProbe>;
