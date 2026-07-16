@@ -31,9 +31,10 @@ class FakeSocket {
 }
 
 async function waitFor(predicate, label) {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
     if (predicate()) return;
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error(`timed out waiting for ${label}`);
 }

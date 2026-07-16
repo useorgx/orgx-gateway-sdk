@@ -1,6 +1,6 @@
 {
   "name": "@useorgx/orgx-gateway-sdk",
-  "version": "0.1.0-alpha.4",
+  "version": "0.1.0-alpha.5",
   "description": "Client SDK for OrgX Gateway Protocol v1/v2/v3. Each editor plugin is a self-sufficient peer that opens its own authenticated WebSocket to OrgX server and implements this protocol directly. No central broker.",
   "type": "module",
   "main": "dist/index.js",
