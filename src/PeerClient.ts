@@ -344,7 +344,10 @@ export class PeerClient {
             );
           }
           this.sendSafely(update);
-          if (update.kind === 'task.completed') {
+          if (
+            update.kind === 'task.completed' ||
+            update.kind === 'task.failed'
+          ) {
             this.completeSuspendedRun(message.run_id);
           }
           continue;
@@ -412,6 +415,7 @@ export class PeerClient {
     let terminalResult: TerminalReceiptMessage | null = null;
     let finalization: TaskFinalizationMessage | null = null;
     let suspended = false;
+    let failed = false;
     try {
       for await (const outbound of driver.dispatch(msg.task, {
         run_id: msg.run_id,
@@ -422,7 +426,7 @@ export class PeerClient {
           : {}),
       })) {
         if (outbound.kind === 'task.suspended') {
-          if (terminalResult || finalization || suspended) {
+          if (terminalResult || finalization || suspended || failed) {
             this.sendProtocolFailure(
               msg.run_id,
               new Error('driver emitted multiple terminal or suspended results')
@@ -431,11 +435,21 @@ export class PeerClient {
           }
           suspended = true;
           this.sendSafely(outbound);
+        } else if (outbound.kind === 'task.failed') {
+          if (terminalResult || finalization || suspended || failed) {
+            this.sendProtocolFailure(
+              msg.run_id,
+              new Error('driver emitted multiple terminal or suspended results')
+            );
+            return;
+          }
+          failed = true;
+          this.sendSafely(outbound);
         } else if (
           outbound.kind === 'task.completed' ||
           isTaskFinalization(outbound)
         ) {
-          if (terminalResult || finalization || suspended) {
+          if (terminalResult || finalization || suspended || failed) {
             this.sendProtocolFailure(
               msg.run_id,
               new Error('driver emitted multiple terminal results')
@@ -467,6 +481,10 @@ export class PeerClient {
       }
       if (suspended) {
         this.suspendedDispatches.set(msg.idempotency_key, msg.run_id);
+        return;
+      }
+      if (failed) {
+        this.rememberCompleted(msg.idempotency_key, msg.run_id);
         return;
       }
       if (finalization && isV2TaskDispatch(msg)) {
