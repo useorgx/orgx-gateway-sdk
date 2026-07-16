@@ -1,5 +1,5 @@
 /**
- * OrgX Gateway Protocol v1/v2 — wire message types.
+ * OrgX Gateway Protocol v1/v2/v3 — wire message types.
  *
  * Each plugin peer implements this protocol directly against OrgX server.
  * See PROTOCOL.md for the wire spec; this file is the TypeScript mirror.
@@ -13,8 +13,8 @@ import type {
 
 /** Backward-compatible default until gateway servers advertise v2. */
 export const PROTOCOL_VERSION = 1 as const;
-export const LATEST_PROTOCOL_VERSION = 2 as const;
-export const SUPPORTED_PROTOCOL_VERSIONS = [1, 2] as const;
+export const LATEST_PROTOCOL_VERSION = 3 as const;
+export const SUPPORTED_PROTOCOL_VERSIONS = [1, 2, 3] as const;
 export type ProtocolVersion = (typeof SUPPORTED_PROTOCOL_VERSIONS)[number];
 
 // ─── Dispatchable task ─────────────────────────────────────────────────────
@@ -25,6 +25,9 @@ export type DispatchableTask = {
   title: string;
   description?: string;
   repo_path?: string;
+  workspace_id?: string;
+  initiative_id?: string;
+  workstream_id?: string;
   skill_ids?: string[];
   driver: TaskDriver;
 };
@@ -59,7 +62,28 @@ export type TaskCancelMessage = {
   reason?: string;
 };
 
-export type ServerToPeerMessage = TaskDispatchMessage | TaskCancelMessage;
+export type AttentionResolutionMessage = {
+  kind: 'attention.resolve';
+  protocol_version: 3;
+  decision_id: string;
+  run_id: string;
+  driver?: TaskDriver;
+  session_handle?: string;
+  idempotency_key: string;
+  resolution: {
+    status: 'approved' | 'declined' | 'cancelled';
+    answer?: unknown;
+    note?: string | null;
+    option_id?: string | null;
+    option_ids?: string[];
+    context?: Record<string, unknown>;
+  };
+};
+
+export type ServerToPeerMessage =
+  | TaskDispatchMessage
+  | TaskCancelMessage
+  | AttentionResolutionMessage;
 
 // ─── Peer → Server ─────────────────────────────────────────────────────────
 
@@ -154,13 +178,42 @@ export type TaskFailedMessage = {
   recoverable: boolean;
 };
 
+export type TaskSuspendedMessage = {
+  kind: 'task.suspended';
+  run_id: string;
+  reason: 'attention';
+  session_handle?: string;
+  detail?: string;
+};
+
+export type ContinuationState =
+  | 'answer_received'
+  | 'resuming'
+  | 'resumed'
+  | 'resume_failed'
+  | 'cancelled';
+
+export type ContinuationReceiptMessage = {
+  kind: 'continuation.receipt';
+  protocol_version: 3;
+  run_id: string;
+  decision_id: string;
+  idempotency_key: string;
+  state: ContinuationState;
+  session_handle?: string;
+  detail?: string;
+  occurred_at: string;
+};
+
 export type PeerToServerMessage =
   | TaskStartedMessage
   | TaskStepMessage
   | TaskDeviationMessage
   | TaskCompletedMessage
   | TaskResultMessage
-  | TaskFailedMessage;
+  | TaskFailedMessage
+  | TaskSuspendedMessage
+  | ContinuationReceiptMessage;
 
 export type DriverOutboundMessage =
   | Exclude<PeerToServerMessage, TaskResultMessage>

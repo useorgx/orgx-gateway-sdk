@@ -1,8 +1,9 @@
 # @useorgx/orgx-gateway-sdk
 
-Client SDK for OrgX Gateway Protocol v1/v2. Protocol v2 adds an opt-in,
-proof-carrying execution boundary; v1 remains the default during the
-compatibility window.
+Client SDK for OrgX Gateway Protocol v1/v2/v3. Protocol v2 adds an opt-in,
+proof-carrying execution boundary. Protocol v3 adds resumable human attention
+with delivery receipts. v1 remains the default during the compatibility
+window.
 
 License: MIT.
 
@@ -41,6 +42,25 @@ Peer clients retry transient network and server-restart closures continuously
 with exponential backoff capped at 30 seconds. Set `reconnect.maxAttempts` when
 a short-lived integration needs a finite retry window; authentication and
 protocol close codes remain non-retryable.
+
+## Resumable attention in v3
+
+A v3 driver can implement `resolveAttention` to restore the session that
+raised a question, apply the human answer, and yield truthful continuation
+transitions:
+
+```ts
+async *resolveAttention(message) {
+  yield { state: 'resuming' };
+  await resumeCliSession(message.session_handle, message.resolution.answer);
+  yield { state: 'resumed', session_handle: message.session_handle };
+}
+```
+
+`PeerClient` emits `answer_received` before invoking the driver, then forwards
+its transitions as `continuation.receipt` messages. A missing implementation,
+ambiguous multi-driver peer, or thrown error becomes `resume_failed`. Receipts
+fall back to the durable attention HTTP endpoint when the socket is down.
 
 ## Proof-carrying v2 finalization
 

@@ -8,6 +8,8 @@
  */
 
 import type {
+  AttentionResolutionMessage,
+  ContinuationState,
   DriverOutboundMessage,
   DispatchableTask,
   ProtocolVersion,
@@ -27,6 +29,17 @@ export type DriverProbe = {
   subscription_active: boolean;
   session_alive: boolean;
   queue_depth?: number;
+};
+
+/**
+ * A driver reports only the client-local continuation transition. PeerClient
+ * supplies the canonical decision, run, protocol, and idempotency fields.
+ */
+export type DriverContinuationUpdate = {
+  state: ContinuationState;
+  session_handle?: string;
+  detail?: string;
+  occurred_at?: string;
 };
 
 export interface Driver {
@@ -61,6 +74,17 @@ export interface Driver {
 
   /** Cancel an in-flight run. Idempotent. */
   cancel(run_id: string): Promise<void>;
+
+  /**
+   * Apply a human answer to the exact paused client session. Optional because
+   * not every CLI exposes a resumable interaction API. Drivers that implement
+   * it should yield `resuming` before starting work and then `resumed` only
+   * after the client has accepted the continuation. Throwing is reported as
+   * `resume_failed` without losing the persisted answer in OrgX.
+   */
+  resolveAttention?(
+    message: AttentionResolutionMessage
+  ): AsyncIterable<DriverContinuationUpdate | DriverOutboundMessage>;
 
   /** Lightweight liveness probe; called periodically by the peer. */
   probe(): Promise<DriverProbe>;

@@ -16,6 +16,8 @@ import {
   isTaskFinalization,
   isV2TaskDispatch,
   PROTOCOL_VERSION,
+  type AttentionResolutionMessage,
+  type ContinuationReceiptMessage,
   type PeerToServerMessage,
   type ProtocolVersion,
   type ProtocolMessage,
@@ -101,6 +103,12 @@ export class PeerClient {
   private readonly completedDispatches = new Map<string, string>();
   private readonly inFlightDispatches = new Map<string, Promise<void>>();
   private readonly pendingReceipts = new Map<string, TerminalReceiptMessage>();
+  private readonly pendingContinuationReceipts = new Map<
+    string,
+    ContinuationReceiptMessage
+  >();
+  private readonly handledAttentionResolutions = new Set<string>();
+  private readonly suspendedDispatches = new Map<string, string>();
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private manualClose = false;
@@ -235,7 +243,8 @@ export class PeerClient {
     if (msg.kind === 'task.dispatch') {
       if (
         this.completedDispatches.has(msg.idempotency_key) ||
-        this.inFlightDispatches.has(msg.idempotency_key)
+        this.inFlightDispatches.has(msg.idempotency_key) ||
+        this.suspendedDispatches.has(msg.idempotency_key)
       ) {
         return;
       }
@@ -253,6 +262,123 @@ export class PeerClient {
           driver.cancel(msg.run_id).catch(() => undefined)
         )
       );
+      return;
+    }
+
+    if (msg.kind === 'attention.resolve') {
+      await this.resolveAttention(msg);
+    }
+  }
+
+  private async resolveAttention(
+    message: AttentionResolutionMessage
+  ): Promise<void> {
+    if (this.handledAttentionResolutions.has(message.idempotency_key)) return;
+    this.handledAttentionResolutions.add(message.idempotency_key);
+
+    const baseReceipt = {
+      kind: 'continuation.receipt' as const,
+      protocol_version: 3 as const,
+      run_id: message.run_id,
+      decision_id: message.decision_id,
+      idempotency_key: message.idempotency_key,
+    };
+    if (message.resolution.status === 'cancelled') {
+      await this.deliverContinuationReceipt({
+        ...baseReceipt,
+        state: 'cancelled',
+        ...(message.session_handle
+          ? { session_handle: message.session_handle }
+          : {}),
+        occurred_at: new Date().toISOString(),
+      });
+      return;
+    }
+
+    await this.deliverContinuationReceipt({
+      ...baseReceipt,
+      state: 'answer_received',
+      ...(message.session_handle
+        ? { session_handle: message.session_handle }
+        : {}),
+      occurred_at: new Date().toISOString(),
+    });
+
+    const candidates = message.driver
+      ? [this.driversById.get(message.driver)].filter(
+          (driver): driver is Driver => Boolean(driver)
+        )
+      : Array.from(this.driversById.values()).filter(
+          (driver) => typeof driver.resolveAttention === 'function'
+        );
+    const driver =
+      candidates.length === 1 && candidates[0]?.resolveAttention
+        ? candidates[0]
+        : null;
+    if (!driver?.resolveAttention) {
+      await this.deliverContinuationReceipt({
+        ...baseReceipt,
+        state: 'resume_failed',
+        ...(message.session_handle
+          ? { session_handle: message.session_handle }
+          : {}),
+        detail:
+          candidates.length > 1
+            ? 'Multiple resumable drivers are registered; attention.resolve must name a driver.'
+            : 'This driver does not implement resumable attention.',
+        occurred_at: new Date().toISOString(),
+      });
+      return;
+    }
+
+    let emitted = false;
+    try {
+      for await (const update of driver.resolveAttention(message)) {
+        if ('kind' in update) {
+          if (update.run_id !== message.run_id) {
+            throw new Error('continuation message run id mismatch');
+          }
+          if (isTaskFinalization(update)) {
+            throw new Error(
+              'proof finalization after attention is not supported by this SDK version'
+            );
+          }
+          this.sendSafely(update);
+          if (
+            update.kind === 'task.completed' ||
+            update.kind === 'task.failed'
+          ) {
+            this.completeSuspendedRun(message.run_id);
+          }
+          continue;
+        }
+        emitted = true;
+        await this.deliverContinuationReceipt({
+          ...baseReceipt,
+          state: update.state,
+          ...(update.session_handle ?? message.session_handle
+            ? {
+                session_handle:
+                  update.session_handle ?? message.session_handle,
+              }
+            : {}),
+          ...(update.detail ? { detail: update.detail } : {}),
+          occurred_at: update.occurred_at ?? new Date().toISOString(),
+        });
+      }
+      if (!emitted) {
+        throw new Error('driver ended without a continuation state');
+      }
+    } catch (error) {
+      await this.deliverContinuationReceipt({
+        ...baseReceipt,
+        state: 'resume_failed',
+        ...(message.session_handle
+          ? { session_handle: message.session_handle }
+          : {}),
+        detail: error instanceof Error ? error.message : String(error),
+        occurred_at: new Date().toISOString(),
+      });
     }
   }
 
@@ -288,6 +414,8 @@ export class PeerClient {
 
     let terminalResult: TerminalReceiptMessage | null = null;
     let finalization: TaskFinalizationMessage | null = null;
+    let suspended = false;
+    let failed = false;
     try {
       for await (const outbound of driver.dispatch(msg.task, {
         run_id: msg.run_id,
@@ -297,11 +425,31 @@ export class PeerClient {
           ? { execution_envelope: msg.execution_envelope }
           : {}),
       })) {
-        if (
+        if (outbound.kind === 'task.suspended') {
+          if (terminalResult || finalization || suspended || failed) {
+            this.sendProtocolFailure(
+              msg.run_id,
+              new Error('driver emitted multiple terminal or suspended results')
+            );
+            return;
+          }
+          suspended = true;
+          this.sendSafely(outbound);
+        } else if (outbound.kind === 'task.failed') {
+          if (terminalResult || finalization || suspended || failed) {
+            this.sendProtocolFailure(
+              msg.run_id,
+              new Error('driver emitted multiple terminal or suspended results')
+            );
+            return;
+          }
+          failed = true;
+          this.sendSafely(outbound);
+        } else if (
           outbound.kind === 'task.completed' ||
           isTaskFinalization(outbound)
         ) {
-          if (terminalResult || finalization) {
+          if (terminalResult || finalization || suspended || failed) {
             this.sendProtocolFailure(
               msg.run_id,
               new Error('driver emitted multiple terminal results')
@@ -330,6 +478,14 @@ export class PeerClient {
         } else {
           this.sendSafely(outbound);
         }
+      }
+      if (suspended) {
+        this.suspendedDispatches.set(msg.idempotency_key, msg.run_id);
+        return;
+      }
+      if (failed) {
+        this.rememberCompleted(msg.idempotency_key, msg.run_id);
+        return;
       }
       if (finalization && isV2TaskDispatch(msg)) {
         try {
@@ -412,9 +568,20 @@ export class PeerClient {
     }
   }
 
+  private completeSuspendedRun(runId: string): void {
+    for (const [idempotencyKey, suspendedRunId] of this.suspendedDispatches) {
+      if (suspendedRunId !== runId) continue;
+      this.suspendedDispatches.delete(idempotencyKey);
+      this.rememberCompleted(idempotencyKey, runId);
+    }
+  }
+
   private async flushPendingReceipts(): Promise<void> {
     for (const receipt of this.pendingReceipts.values()) {
       await this.postReceipt(receipt);
+    }
+    for (const receipt of this.pendingContinuationReceipts.values()) {
+      await this.postContinuationReceipt(receipt);
     }
   }
 
@@ -440,6 +607,62 @@ export class PeerClient {
         throw new Error(`receipt recovery failed with ${response.status}`);
       }
       this.pendingReceipts.delete(receipt.run_id);
+    } catch (error) {
+      this.config.onError?.(error);
+    }
+  }
+
+  private async deliverContinuationReceipt(
+    receipt: ContinuationReceiptMessage
+  ): Promise<void> {
+    const receiptKey = `${receipt.decision_id}:${receipt.state}`;
+    this.pendingContinuationReceipts.set(receiptKey, receipt);
+    try {
+      this.send(receipt);
+    } catch (error) {
+      this.config.onError?.(error);
+    }
+    // Persist independently of the WebSocket. v3 can therefore roll out to
+    // peers before every gateway relay knows how to consume receipt frames,
+    // and a successful socket write is never mistaken for durable acceptance.
+    await this.postContinuationReceipt(receipt);
+  }
+
+  private async postContinuationReceipt(
+    receipt: ContinuationReceiptMessage
+  ): Promise<void> {
+    const request = this.config.fetch ?? globalThis.fetch;
+    if (!request) return;
+    const base = this.config.baseUrl
+      .replace(/^ws:/, 'http:')
+      .replace(/^wss:/, 'https:');
+    const url = new URL(
+      `/api/client/live/attention/${encodeURIComponent(receipt.decision_id)}`,
+      base
+    );
+    const receiptKey = `${receipt.decision_id}:${receipt.state}`;
+    try {
+      const response = await request(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': `${receipt.idempotency_key}:${receipt.state}`,
+        },
+        body: JSON.stringify({
+          state: receipt.state,
+          idempotency_key: receipt.idempotency_key,
+          session_handle: receipt.session_handle,
+          detail: receipt.detail,
+          occurred_at: receipt.occurred_at,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(
+          `continuation receipt recovery failed with ${response.status}`
+        );
+      }
+      this.pendingContinuationReceipts.delete(receiptKey);
     } catch (error) {
       this.config.onError?.(error);
     }
