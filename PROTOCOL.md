@@ -1,7 +1,7 @@
-# OrgX Gateway Protocol v1/v2 — Wire Spec
+# OrgX Gateway Protocol v1/v2/v3 — Wire Spec
 
-Supported versions: `1` and `2`. Subprotocol strings: `orgx.v1` and
-`orgx.v2`.
+Supported versions: `1`, `2`, and `3`. Subprotocol strings: `orgx.v1`,
+`orgx.v2`, and `orgx.v3`.
 
 The shared client defaults to v1 until the gateway advertises v2 support. A
 peer opts into v2 with `protocolVersion: 2`; this keeps the migration additive
@@ -34,6 +34,8 @@ Every frame is a single JSON object with a `kind` discriminator. See `src/protoc
 - `task.dispatch` — run this task on the named driver. In v2 it also carries a
   canonical, content-addressed `execution_envelope`.
 - `task.cancel` — stop an in-flight run
+- `attention.resolve` (v3) — deliver a persisted human answer to the exact
+  run/session that raised the question, permission, approval, or recovery ask
 
 ### Peer → Server
 
@@ -45,6 +47,9 @@ Every frame is a single JSON object with a `kind` discriminator. See `src/protoc
 - `task.result` (v2) — the single typed terminal result carrying the canonical
   OrgX-issued `ExecutionResult`, including work lineage, receipts, artifacts,
   proof, outcomes, costs, and disposition.
+- `continuation.receipt` (v3) — acknowledge `answer_received`, `resuming`,
+  `resumed`, `resume_failed`, or `cancelled`; this is the source of truth for
+  whether work actually moved after a person answered.
 
 `task.finalize` is an SDK-local driver handoff, not a wire message. It carries
 the content-hashed finalization request and canonical action/verification
@@ -75,6 +80,35 @@ the OrgX-issued response digest, proof reference, result digest, and envelope
 lineage before emitting `task.result`. Legacy `task.completed` remains the v1
 terminal message.
 
+## v3 resumable-attention boundary
+
+Protocol v3 adds an interruption lifecycle without changing v1/v2 task
+execution or finalization:
+
+```text
+client asks or needs permission
+  -> OrgX attention record (waiting)
+human answers in OrgX
+  -> attention.resolve over the owning peer connection
+peer persists answer_received
+  -> driver restores the exact session/tool call
+peer emits resuming
+  -> CLI accepts the answer and work advances
+peer emits resumed (or resume_failed with a reason)
+```
+
+`attention.resolve` includes a stable decision ID, run ID, optional driver and
+session handle, the structured answer, and an idempotency key. `PeerClient`
+deduplicates the resolution and wraps driver-local continuation updates in
+canonical receipts. If the WebSocket is unavailable, it posts each receipt to
+`/api/client/live/attention/:decision_id`, so UI state never has to infer
+motion from a button click.
+
+Drivers opt in with `resolveAttention`. A peer that cannot resume reports
+`resume_failed`; it must not claim work is running. An OrgX-stored answer
+remains available for polling even when push delivery or local continuation
+fails.
+
 ## Idempotency
 
 Every `task.dispatch` carries an `idempotency_key`. Peers MUST deduplicate by this key; re-dispatching the same key is a no-op.
@@ -97,4 +131,6 @@ intentional close codes do not reconnect.
 
 - The server can disable a driver by rejecting `task.dispatch` for that driver with a structured error. The plugin surfaces a degraded banner and its UI shows the driver as unavailable.
 - The server can kill an entire plugin by revoking its `plugin_licenses` row. Subsequent heartbeats return 402; deviation endpoints also return 402. The peer continues to render read-only views.
-- Protocol version bumps require parallel support windows. v1 and v2 will coexist server-side for at least one quarter before v1 is retired.
+- Protocol version bumps require parallel support windows. v1, v2, and v3
+  coexist server-side; a peer opts into v3 only after its driver implements
+  truthful continuation receipts.

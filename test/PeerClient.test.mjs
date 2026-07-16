@@ -213,6 +213,24 @@ function v2Dispatch(runId = 'run-v2', key = 'dispatch-v2') {
   };
 }
 
+function attentionResolution(overrides = {}) {
+  return {
+    kind: 'attention.resolve',
+    protocol_version: 3,
+    decision_id: 'decision-1',
+    run_id: 'run-1',
+    driver: 'codex',
+    session_handle: 'thread-1',
+    idempotency_key: 'attention:decision-1:resolve',
+    resolution: {
+      status: 'approved',
+      answer: 'Use the restrained direction.',
+      option_id: 'restrained',
+    },
+    ...overrides,
+  };
+}
+
 function createDriver(counter) {
   return {
     id: 'codex',
@@ -229,6 +247,20 @@ function createDriver(counter) {
     },
     async cancel() {},
   };
+}
+
+function createResumableDriver(resolutions) {
+  const driver = createDriver({ count: 0 });
+  driver.resolveAttention = async function* (message) {
+    resolutions.push(message);
+    yield { state: 'resuming', detail: 'Restoring thread.' };
+    yield {
+      state: 'resumed',
+      session_handle: message.session_handle,
+      detail: 'Thread accepted the answer.',
+    };
+  };
+  return driver;
 }
 
 function createV2Driver(contexts, mutateDraft = (draft) => draft) {
@@ -320,6 +352,117 @@ describe('PeerClient', () => {
     assert.equal(
       socket.sent.at(-1).execution_result.producer.actor.id,
       'orgx-execution-finalizer'
+    );
+  });
+
+  it('opts into v3 and carries an attention answer through resumed acknowledgment', async () => {
+    let opened;
+    const socket = new FakeSocket();
+    const resolutions = [];
+    const receipts = [];
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      protocolVersion: 3,
+      drivers: [createResumableDriver(resolutions)],
+      async fetch(url, init) {
+        receipts.push({ url: String(url), init });
+        return new Response('{}', { status: 200 });
+      },
+      webSocketFactory(url, protocols) {
+        opened = { url, protocols };
+        return socket;
+      },
+    });
+    client.connect();
+    socket.emit('open');
+    socket.emit('message', { data: JSON.stringify(attentionResolution()) });
+    await waitFor(
+      () =>
+        socket.sent.filter(
+          (message) => message.kind === 'continuation.receipt'
+        ).length === 3,
+      'continuation receipts'
+    );
+
+    assert.deepEqual(opened.protocols, ['orgx.v3', 'bearer.oxk_test']);
+    assert.equal(resolutions.length, 1);
+    assert.equal(resolutions[0].resolution.option_id, 'restrained');
+    assert.deepEqual(
+      socket.sent
+        .filter((message) => message.kind === 'continuation.receipt')
+        .map((message) => message.state),
+      ['answer_received', 'resuming', 'resumed']
+    );
+    assert.equal(receipts.length, 3);
+
+    socket.emit('message', { data: JSON.stringify(attentionResolution()) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(resolutions.length, 1, 'resolution is idempotent');
+  });
+
+  it('reports a truthful failure when the selected driver cannot resume', async () => {
+    const socket = new FakeSocket();
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      protocolVersion: 3,
+      drivers: [createDriver({ count: 0 })],
+      async fetch() {
+        return new Response('{}', { status: 200 });
+      },
+      webSocketFactory: () => socket,
+    });
+    client.connect();
+    socket.emit('open');
+    socket.emit('message', { data: JSON.stringify(attentionResolution()) });
+    await waitFor(
+      () => socket.sent.at(-1)?.state === 'resume_failed',
+      'unsupported continuation failure'
+    );
+    assert.deepEqual(
+      socket.sent
+        .filter((message) => message.kind === 'continuation.receipt')
+        .map((message) => message.state),
+      ['answer_received', 'resume_failed']
+    );
+    assert.match(socket.sent.at(-1).detail, /does not implement/);
+  });
+
+  it('persists continuation receipts over HTTP when the socket drops', async () => {
+    const socket = new FakeSocket();
+    const requests = [];
+    socket.send = () => {
+      throw new Error('socket dropped');
+    };
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      protocolVersion: 3,
+      drivers: [createResumableDriver([])],
+      webSocketFactory: () => socket,
+      async fetch(url, init) {
+        requests.push({ url: String(url), init });
+        return new Response('{}', { status: 200 });
+      },
+    });
+    client.connect();
+    socket.emit('open');
+    socket.emit('message', { data: JSON.stringify(attentionResolution()) });
+    await waitFor(() => requests.length === 3, 'continuation HTTP receipts');
+    assert.match(
+      requests[0].url,
+      /\/api\/client\/live\/attention\/decision-1$/
+    );
+    assert.deepEqual(
+      requests.map((request) => JSON.parse(request.init.body).state),
+      ['answer_received', 'resuming', 'resumed']
     );
   });
 
