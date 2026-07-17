@@ -300,6 +300,7 @@ describe('PeerClient', () => {
       workspaceId: 'workspace-1',
       pluginId: 'orgx-codex-plugin',
       installationId: 'install-1',
+      runnerInstanceId: 'codex-018f1f80-7b9a-7e53-b9a0-0f499a02e07c',
       drivers: [createDriver({ count: 0 })],
       webSocketFactory(url, protocols) {
         opened = { url, protocols };
@@ -311,8 +312,63 @@ describe('PeerClient', () => {
     assert.equal(url.pathname, '/api/v1/gateway/stream');
     assert.equal(url.searchParams.get('plugin_id'), 'orgx-codex-plugin');
     assert.equal(url.searchParams.get('installation_id'), 'install-1');
+    assert.equal(
+      url.searchParams.get('runner_instance_id'),
+      'codex-018f1f80-7b9a-7e53-b9a0-0f499a02e07c'
+    );
     assert.equal(url.searchParams.get('drivers'), 'codex');
     assert.deepEqual(opened.protocols, ['orgx.v1', 'bearer.oxk_test']);
+  });
+
+  it('fails closed before opening a socket when runner identity is invalid', () => {
+    const invalidRunnerInstanceIds = [
+      '',
+      ' candidate-1',
+      'candidate-1 ',
+      'candidate/1',
+      'candidate 1',
+      'a'.repeat(161),
+      null,
+    ];
+
+    for (const runnerInstanceId of invalidRunnerInstanceIds) {
+      let factoryCalls = 0;
+      assert.throws(
+        () =>
+          new PeerClient({
+            baseUrl: 'wss://useorgx.com',
+            apiKey: 'oxk_test',
+            workspaceId: 'workspace-1',
+            pluginId: 'orgx-codex-plugin',
+            runnerInstanceId,
+            drivers: [createDriver({ count: 0 })],
+            webSocketFactory() {
+              factoryCalls += 1;
+              return new FakeSocket();
+            },
+          }),
+        /runnerInstanceId must be 1-160 characters/
+      );
+      assert.equal(factoryCalls, 0);
+    }
+  });
+
+  it('keeps runner identity optional for compatibility peers', () => {
+    let opened;
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      drivers: [createDriver({ count: 0 })],
+      webSocketFactory(url) {
+        opened = url;
+        return new FakeSocket();
+      },
+    });
+
+    client.connect();
+    assert.equal(new URL(opened).searchParams.has('runner_instance_id'), false);
   });
 
   it('opts into v2 explicitly and forwards the proof-carrying envelope', async () => {
@@ -464,6 +520,21 @@ describe('PeerClient', () => {
     assert.deepEqual(
       requests.map((request) => JSON.parse(request.init.body).state),
       ['answer_received', 'resuming', 'resumed']
+    );
+    assert.deepEqual(
+      requests.map((request) => {
+        const body = JSON.parse(request.init.body);
+        return {
+          run_id: body.run_id,
+          source_client: body.source_client,
+          session_handle: body.session_handle,
+        };
+      }),
+      Array.from({ length: 3 }, () => ({
+        run_id: 'run-1',
+        source_client: 'codex',
+        session_handle: 'thread-1',
+      }))
     );
   });
 

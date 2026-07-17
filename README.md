@@ -32,6 +32,7 @@ const client = new PeerClient({
   apiKey: process.env.ORGX_API_KEY!,
   workspaceId: 'ws-uuid',
   pluginId: '@useorgx/claude-code-plugin',
+  runnerInstanceId: process.env.ORGX_RUNNER_INSTANCE_ID,
   drivers: [new ClaudeCodeDriver()],
 });
 
@@ -42,6 +43,19 @@ Peer clients retry transient network and server-restart closures continuously
 with exponential backoff capped at 30 seconds. Set `reconnect.maxAttempts` when
 a short-lived integration needs a finite retry window; authentication and
 protocol close codes remain non-retryable.
+
+## Runner instance identity
+
+`runnerInstanceId` gives the control plane an exact identity for one durable
+runner process. The SDK sends it as the `runner_instance_id` WebSocket query
+parameter. It is optional for compatibility peers, but managed autonomous
+runners and credential-activation candidates must supply it and must send the
+same value as top-level `runner_instance_id` in their heartbeat.
+
+When supplied, the SDK validates the identity before opening a socket. It must
+be 1-160 characters, start with an ASCII letter or digit, and contain only
+letters, digits, `.`, `_`, `:`, or `-`. Invalid values fail closed rather than
+silently connecting without an exact identity.
 
 ## Resumable attention in v3
 
