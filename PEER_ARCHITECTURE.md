@@ -22,6 +22,7 @@ OpenClaw's original "broker" role is deprecated. Its Claude-Code-specific dispat
        baseUrl: 'wss://useorgx.com',
        apiKey: 'oxk_...', // scope: gateway:drive
        workspaceId, pluginId: '@useorgx/claude-code-plugin',
+       runnerInstanceId, // required for managed autonomous runners
        drivers: [new ClaudeCodeDriver()],
      });
      client.connect();
@@ -49,5 +50,8 @@ OpenClaw's original "broker" role is deprecated. Its Claude-Code-specific dispat
 - **One WS per peer per workspace.** Two browser tabs = still one peer process (the plugin, not the UI).
 - **Driver is a plugin implementation detail.** The server never names a specific driver; it names `task.driver` which the plugin routes. If a peer doesn't have that driver, it returns `task.failed` with `recoverable: false` so the server can pick a different peer.
 - **Plugin is identified by `plugin_id` + `installation_id`.** The server tracks each in `gateway_connections`.
+- **A managed runner process is identified by `runner_instance_id`.** It uses
+  the same exact stable value in its top-level heartbeat and WebSocket query;
+  this lets activation and promotion prove which durable process connected.
 - **No peer depends on another.** If the OpenCode plugin is killswitched, the Claude Code plugin keeps running. Bugs don't cascade.
 - **Protocol version is negotiated at connect.** The client sends `orgx.v1` as a WebSocket subprotocol. If the server only supports v2, the handshake fails cleanly.

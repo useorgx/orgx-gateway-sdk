@@ -19,6 +19,7 @@ const DEFAULT_RECONNECT = {
 };
 const IDEMPOTENCY_CACHE_LIMIT = 1_000;
 const NON_RETRYABLE_CLOSE_CODES = new Set([1000, 4000, 4001, 4003, 4401, 4403]);
+const RUNNER_INSTANCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 export class PeerClient {
     config;
     ws = null;
@@ -35,6 +36,7 @@ export class PeerClient {
     manualClose = false;
     constructor(config) {
         this.config = config;
+        validateRunnerInstanceId(config.runnerInstanceId);
         for (const driver of config.drivers) {
             this.driversById.set(driver.id, driver);
         }
@@ -76,6 +78,9 @@ export class PeerClient {
         url.searchParams.set('drivers', this.advertisedDrivers.join(','));
         if (this.config.installationId) {
             url.searchParams.set('installation_id', this.config.installationId);
+        }
+        if (this.config.runnerInstanceId !== undefined) {
+            url.searchParams.set('runner_instance_id', this.config.runnerInstanceId);
         }
         const protocols = [
             `orgx.v${this.config.protocolVersion ?? PROTOCOL_VERSION}`,
@@ -510,6 +515,14 @@ export class PeerClient {
         catch (error) {
             this.config.onError?.(error);
         }
+    }
+}
+function validateRunnerInstanceId(runnerInstanceId) {
+    if (runnerInstanceId === undefined)
+        return;
+    if (typeof runnerInstanceId !== 'string' ||
+        !RUNNER_INSTANCE_ID_PATTERN.test(runnerInstanceId)) {
+        throw new TypeError('PeerClient runnerInstanceId must be 1-160 characters and match /^[A-Za-z0-9][A-Za-z0-9._:-]*$/');
     }
 }
 function receiptBody(receipt) {

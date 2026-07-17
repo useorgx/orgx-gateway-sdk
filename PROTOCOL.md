@@ -16,6 +16,7 @@ Query params:
   workspace_id=<uuid>
   plugin_id=<string>            e.g. @useorgx/claude-code-plugin
   drivers=claude_code,codex     comma-separated
+  runner_instance_id=<string>   exact durable process identity (managed runners)
 ```
 
 The peer offers two subprotocols in the WebSocket handshake:
@@ -24,6 +25,13 @@ The peer offers two subprotocols in the WebSocket handshake:
 - `bearer.<apiKey>` — bearer auth payload (WebSocket API can't set headers)
 
 The server accepts exactly one protocol version per connection. A mismatch closes the socket with code `4000` and reason `protocol-version-unsupported`. See `PeerClient.ts` for the client side.
+
+Compatibility peers may omit `runner_instance_id`. Managed autonomous runners,
+including credential-activation candidates, MUST include it and MUST use the
+same exact value as the top-level `runner_instance_id` in their license
+heartbeat. The shared client accepts 1-160 characters matching
+`^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$` and rejects an invalid supplied value
+before opening a socket.
 
 ## Message envelope
 

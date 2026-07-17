@@ -37,6 +37,11 @@ export type PeerClientConfig = {
     protocolVersion?: ProtocolVersion;
     /** Optional installation identity advertised to the gateway. */
     installationId?: string;
+    /**
+     * Stable process identity advertised to the gateway. Managed autonomous
+     * runners must supply the same value in their heartbeat and stream URL.
+     */
+    runnerInstanceId?: string;
     /** Called instead of the default task router when supplied. */
     onMessage?: (msg: ServerToPeerMessage) => void;
     onOpen?: () => void;

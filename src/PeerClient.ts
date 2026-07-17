@@ -60,6 +60,11 @@ export type PeerClientConfig = {
   protocolVersion?: ProtocolVersion;
   /** Optional installation identity advertised to the gateway. */
   installationId?: string;
+  /**
+   * Stable process identity advertised to the gateway. Managed autonomous
+   * runners must supply the same value in their heartbeat and stream URL.
+   */
+  runnerInstanceId?: string;
   /** Called instead of the default task router when supplied. */
   onMessage?: (msg: ServerToPeerMessage) => void;
   onOpen?: () => void;
@@ -94,6 +99,7 @@ const DEFAULT_RECONNECT = {
 } as const;
 const IDEMPOTENCY_CACHE_LIMIT = 1_000;
 const NON_RETRYABLE_CLOSE_CODES = new Set([1000, 4000, 4001, 4003, 4401, 4403]);
+const RUNNER_INSTANCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 type TerminalReceiptMessage = TaskCompletedMessage | TaskResultMessage;
 
 export class PeerClient {
@@ -114,6 +120,7 @@ export class PeerClient {
   private manualClose = false;
 
   constructor(private readonly config: PeerClientConfig) {
+    validateRunnerInstanceId(config.runnerInstanceId);
     for (const driver of config.drivers) {
       this.driversById.set(driver.id, driver);
     }
@@ -161,6 +168,9 @@ export class PeerClient {
     url.searchParams.set('drivers', this.advertisedDrivers.join(','));
     if (this.config.installationId) {
       url.searchParams.set('installation_id', this.config.installationId);
+    }
+    if (this.config.runnerInstanceId !== undefined) {
+      url.searchParams.set('runner_instance_id', this.config.runnerInstanceId);
     }
 
     const protocols = [
@@ -666,6 +676,18 @@ export class PeerClient {
     } catch (error) {
       this.config.onError?.(error);
     }
+  }
+}
+
+function validateRunnerInstanceId(runnerInstanceId: unknown): void {
+  if (runnerInstanceId === undefined) return;
+  if (
+    typeof runnerInstanceId !== 'string' ||
+    !RUNNER_INSTANCE_ID_PATTERN.test(runnerInstanceId)
+  ) {
+    throw new TypeError(
+      'PeerClient runnerInstanceId must be 1-160 characters and match /^[A-Za-z0-9][A-Za-z0-9._:-]*$/'
+    );
   }
 }
 
