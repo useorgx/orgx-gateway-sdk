@@ -521,6 +521,21 @@ describe('PeerClient', () => {
       requests.map((request) => JSON.parse(request.init.body).state),
       ['answer_received', 'resuming', 'resumed']
     );
+    assert.deepEqual(
+      requests.map((request) => {
+        const body = JSON.parse(request.init.body);
+        return {
+          run_id: body.run_id,
+          source_client: body.source_client,
+          session_handle: body.session_handle,
+        };
+      }),
+      Array.from({ length: 3 }, () => ({
+        run_id: 'run-1',
+        source_client: 'codex',
+        session_handle: 'thread-1',
+      }))
+    );
   });
 
   it('keeps a deferred task suspended and finishes it through continuation', async () => {

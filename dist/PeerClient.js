@@ -500,6 +500,8 @@ export class PeerClient {
                     'Idempotency-Key': `${receipt.idempotency_key}:${receipt.state}`,
                 },
                 body: JSON.stringify({
+                    run_id: receipt.run_id,
+                    source_client: sourceClientForPlugin(this.config.pluginId),
                     state: receipt.state,
                     idempotency_key: receipt.idempotency_key,
                     session_handle: receipt.session_handle,
@@ -516,6 +518,13 @@ export class PeerClient {
             this.config.onError?.(error);
         }
     }
+}
+function sourceClientForPlugin(pluginId) {
+    if (pluginId === 'orgx-codex-plugin')
+        return 'codex';
+    if (pluginId === 'orgx-claude-code-plugin')
+        return 'claude-code';
+    return pluginId;
 }
 function validateRunnerInstanceId(runnerInstanceId) {
     if (runnerInstanceId === undefined)
