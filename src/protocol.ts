@@ -128,7 +128,32 @@ export type OutcomeKind =
   | 'awaiting_review';
 
 export type Provider = 'anthropic' | 'openai' | 'other';
-export type SourceSubType = 'subscription' | 'api_key' | 'enterprise_key';
+export const SOURCE_SUB_TYPES = [
+  'subscription',
+  'api_key',
+  'enterprise_key',
+  'user_managed',
+] as const;
+export type SourceSubType = (typeof SOURCE_SUB_TYPES)[number];
+
+/**
+ * Parse the exact billing/auth source asserted by a peer terminal receipt.
+ * `user_managed` is intentionally non-speculative: use it when the client can
+ * prove the provider but cannot observe whether the user's local credential is
+ * OAuth, a subscription, or an API key.
+ */
+export function parseSourceSubType(value: unknown): SourceSubType {
+  if (
+    typeof value === 'string' &&
+    (SOURCE_SUB_TYPES as readonly string[]).includes(value)
+  ) {
+    return value as SourceSubType;
+  }
+
+  throw new TypeError(
+    `source_sub_type must be one of: ${SOURCE_SUB_TYPES.join(', ')}`
+  );
+}
 
 export type TaskCompletedMessage = {
   kind: 'task.completed';

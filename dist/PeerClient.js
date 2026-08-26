@@ -7,7 +7,7 @@
  */
 import { validateExecutionEnvelope } from './execution.js';
 import { ExecutionFinalizationError, postExecutionFinalization, } from './ExecutionFinalizer.js';
-import { isTaskFinalization, isV2TaskDispatch, PROTOCOL_VERSION, } from './protocol.js';
+import { isTaskFinalization, isV2TaskDispatch, parseSourceSubType, PROTOCOL_VERSION, } from './protocol.js';
 const DEFAULT_RECONNECT = {
     // Local peers are supervised daemons. A normal production deploy can last
     // longer than eight attempts, so keep retrying with a capped delay until the
@@ -66,6 +66,12 @@ export class PeerClient {
     send(message) {
         if (this.state !== 'open' || !this.ws) {
             throw new Error(`PeerClient.send called while state=${this.state}`);
+        }
+        if (message.kind === 'task.completed') {
+            parseSourceSubType(message.source_sub_type);
+        }
+        if (message.kind === 'task.result' && message.provider_attribution) {
+            parseSourceSubType(message.provider_attribution.source_sub_type);
         }
         this.ws.send(JSON.stringify(message));
     }
@@ -239,6 +245,9 @@ export class PeerClient {
                     if (isTaskFinalization(update)) {
                         throw new Error('proof finalization after attention is not supported by this SDK version');
                     }
+                    if (update.kind === 'task.completed') {
+                        parseSourceSubType(update.source_sub_type);
+                    }
                     this.sendSafely(update);
                     if (update.kind === 'task.completed' ||
                         update.kind === 'task.failed') {
@@ -344,9 +353,13 @@ export class PeerClient {
                             this.sendProtocolFailure(msg.run_id, new Error('finalization request run id mismatch'));
                             return;
                         }
+                        if (outbound.provider_attribution) {
+                            parseSourceSubType(outbound.provider_attribution.source_sub_type);
+                        }
                         finalization = outbound;
                     }
                     else if (outbound.kind === 'task.completed') {
+                        parseSourceSubType(outbound.source_sub_type);
                         terminalResult = outbound;
                     }
                 }
@@ -545,9 +558,10 @@ function receiptBody(receipt) {
             metadata: { recovered_from: 'gateway_socket' },
         };
     }
+    const sourceSubType = parseSourceSubType(receipt.source_sub_type);
     return {
         provider: receipt.provider,
-        source_sub_type: receipt.source_sub_type,
+        source_sub_type: sourceSubType,
         source_driver: receipt.source_driver,
         started_at: receipt.started_at,
         first_response_at: receipt.first_response_at ?? null,

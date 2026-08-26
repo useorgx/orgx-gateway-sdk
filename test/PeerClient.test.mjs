@@ -52,6 +52,12 @@ const completed = (runId) => ({
   cost_estimate_cents: 0,
 });
 
+const userManagedCompletion = (runId) => ({
+  ...completed(runId),
+  source_driver: 'opencode',
+  source_sub_type: 'user_managed',
+});
+
 function dispatch(runId = 'run-1', key = 'dispatch-1') {
   return {
     kind: 'task.dispatch',
@@ -291,6 +297,73 @@ function createV2Driver(contexts, mutateDraft = (draft) => draft) {
 }
 
 describe('PeerClient', () => {
+  it('emits a truthful user-managed terminal receipt', async () => {
+    const socket = new FakeSocket();
+    const driver = createDriver({ count: 0 });
+    driver.id = 'opencode';
+    driver.dispatch = async function* (_task, context) {
+      yield { kind: 'task.started', run_id: context.run_id, started_at: 'now' };
+      yield userManagedCompletion(context.run_id);
+    };
+
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-opencode-plugin',
+      drivers: [driver],
+      webSocketFactory: () => socket,
+    });
+    client.connect();
+    socket.emit('open');
+    const message = dispatch('run-user-managed');
+    message.task.driver = 'opencode';
+    socket.emit('message', { data: JSON.stringify(message) });
+
+    await waitFor(
+      () => socket.sent.at(-1)?.kind === 'task.completed',
+      'user-managed completion'
+    );
+    assert.equal(socket.sent.at(-1).source_sub_type, 'user_managed');
+    assert.equal(socket.sent.at(-1).source_driver, 'opencode');
+  });
+
+  it('rejects an unknown terminal receipt source at runtime', async () => {
+    const socket = new FakeSocket();
+    const driver = createDriver({ count: 0 });
+    driver.dispatch = async function* (_task, context) {
+      yield { kind: 'task.started', run_id: context.run_id, started_at: 'now' };
+      yield {
+        ...completed(context.run_id),
+        source_sub_type: 'opaque_local_auth',
+      };
+    };
+
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      drivers: [driver],
+      webSocketFactory: () => socket,
+    });
+    client.connect();
+    socket.emit('open');
+    socket.emit('message', {
+      data: JSON.stringify(dispatch('run-invalid-source')),
+    });
+
+    await waitFor(
+      () => socket.sent.at(-1)?.kind === 'task.failed',
+      'invalid source rejection'
+    );
+    assert.match(socket.sent.at(-1).reason, /source_sub_type must be one of/);
+    assert.equal(
+      socket.sent.some((message) => message.kind === 'task.completed'),
+      false
+    );
+  });
+
   it('advertises normalized identity and driver in the socket contract', () => {
     let opened;
     const socket = new FakeSocket();
