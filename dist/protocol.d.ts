@@ -89,7 +89,15 @@ export type TaskDeviationMessage = {
 };
 export type OutcomeKind = 'shipped' | 'blocked' | 'abandoned' | 'awaiting_review';
 export type Provider = 'anthropic' | 'openai' | 'other';
-export type SourceSubType = 'subscription' | 'api_key' | 'enterprise_key';
+export declare const SOURCE_SUB_TYPES: readonly ["subscription", "api_key", "enterprise_key", "user_managed"];
+export type SourceSubType = (typeof SOURCE_SUB_TYPES)[number];
+/**
+ * Parse the exact billing/auth source asserted by a peer terminal receipt.
+ * `user_managed` is intentionally non-speculative: use it when the client can
+ * prove the provider but cannot observe whether the user's local credential is
+ * OAuth, a subscription, or an API key.
+ */
+export declare function parseSourceSubType(value: unknown): SourceSubType;
 export type TaskCompletedMessage = {
     kind: 'task.completed';
     run_id: string;

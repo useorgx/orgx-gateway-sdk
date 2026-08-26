@@ -65,6 +65,12 @@ Every frame is a single JSON object with a `kind` discriminator. See `src/protoc
 the content-hashed finalization request and canonical action/verification
 source IDs. `PeerClient` posts it to OrgX before it can emit `task.result`.
 
+`source_sub_type` is one of `subscription`, `api_key`, `enterprise_key`, or
+`user_managed`. Peers MUST use `user_managed` when they can observe the model
+provider but the local client does not expose whether its credential came from
+OAuth, a subscription, or an API key. They must not guess a more specific
+commercial source from successful execution alone.
+
 ## v2 proof-carrying boundary
 
 Protocol v2 preserves the familiar task description for driver UX while making
