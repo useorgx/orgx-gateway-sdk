@@ -25,6 +25,8 @@ const providerAttribution: NonNullable<
   TaskResultMessage['provider_attribution']
 > = {
   provider: 'openai',
+  provider_id: 'openai',
+  observed_provider_id: 'openai',
   source_sub_type: 'user_managed',
   source_driver: 'opencode',
   tokens_used: 1,
@@ -32,6 +34,37 @@ const providerAttribution: NonNullable<
 };
 
 void providerAttribution;
+
+const nullableProviderId: TaskCompletedMessage = {
+  ...terminal,
+  provider: 'other',
+  provider_id: null,
+  observed_provider_id: null,
+};
+
+void nullableProviderId;
+
+const opaqueProviderId: NonNullable<
+  TaskResultMessage['provider_attribution']
+> = {
+  ...providerAttribution,
+  provider: 'other',
+  provider_id: 'openrouter',
+  observed_provider_id: 'openai',
+};
+
+void opaqueProviderId;
+
+const nullableProviderAttribution: NonNullable<
+  TaskResultMessage['provider_attribution']
+> = {
+  ...providerAttribution,
+  provider: 'other',
+  provider_id: null,
+  observed_provider_id: null,
+};
+
+void nullableProviderAttribution;
 
 // @ts-expect-error Unknown attribution values must remain outside the contract.
 const unknownSourceSubType: SourceSubType = 'opaque_local_auth';

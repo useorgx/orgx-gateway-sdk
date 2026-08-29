@@ -729,6 +729,12 @@ function receiptBody(receipt: TerminalReceiptMessage): Record<string, unknown> {
   const sourceSubType = parseSourceSubType(receipt.source_sub_type);
   return {
     provider: receipt.provider,
+    ...('provider_id' in receipt
+      ? { provider_id: receipt.provider_id }
+      : {}),
+    ...('observed_provider_id' in receipt
+      ? { observed_provider_id: receipt.observed_provider_id }
+      : {}),
     source_sub_type: sourceSubType,
     source_driver: receipt.source_driver,
     started_at: receipt.started_at,

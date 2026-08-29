@@ -71,6 +71,13 @@ provider but the local client does not expose whether its credential came from
 OAuth, a subscription, or an API key. They must not guess a more specific
 commercial source from successful execution alone.
 
+Terminal provider attribution may also carry `provider_id` and
+`observed_provider_id`. `provider_id` is the opaque, immutable provider-route
+lease; `observed_provider_id` is the provider identity learned during native
+execution. Either is optional and may be `null` when explicitly unknown.
+Peers and recovery transports preserve each field independently in its exact
+state: missing, `null`, or the original string value.
+
 ## v2 proof-carrying boundary
 
 Protocol v2 preserves the familiar task description for driver UX while making
