@@ -65,6 +65,7 @@ export declare class PeerClient {
     private readonly completedDispatches;
     private readonly inFlightDispatches;
     private readonly pendingReceipts;
+    private readonly pendingTaskFailures;
     private readonly pendingContinuationReceipts;
     private readonly handledAttentionResolutions;
     private readonly suspendedDispatches;
@@ -84,6 +85,8 @@ export declare class PeerClient {
     private resolveAttention;
     private executeDispatch;
     private sendProtocolFailure;
+    private deliverTaskFailure;
+    private sendPendingTaskFailure;
     private sendSafely;
     private rememberCompleted;
     private completeSuspendedRun;

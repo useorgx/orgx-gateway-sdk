@@ -142,6 +142,13 @@ Every `task.dispatch` carries an `idempotency_key`. Peers MUST deduplicate by th
 the terminal receipt via HTTP (survives WS outages). The server deduplicates on
 `run_id`.
 
+`task.failed` remains a WebSocket-only terminal message because the Gateway's
+HTTP receipt route does not accept failures. If its first socket write fails,
+the peer retains the exact failure payload with its dispatch idempotency key,
+suppresses a duplicate dispatch, and replays the failure once when the socket
+reconnects. A successful socket write clears that pending failure and moves the
+dispatch into the completed idempotency cache.
+
 The shared `PeerClient` enforces both guarantees with a bounded in-memory
 idempotency cache and `POST /api/v1/runs/:run_id/receipt` recovery. Transient
 socket closes reconnect with bounded exponential backoff. Protocol, auth, and
