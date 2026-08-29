@@ -26,6 +26,7 @@ const providerAttribution: NonNullable<
 > = {
   provider: 'openai',
   provider_id: 'openai',
+  observed_provider_id: 'openai',
   source_sub_type: 'user_managed',
   source_driver: 'opencode',
   tokens_used: 1,
@@ -38,6 +39,7 @@ const nullableProviderId: TaskCompletedMessage = {
   ...terminal,
   provider: 'other',
   provider_id: null,
+  observed_provider_id: null,
 };
 
 void nullableProviderId;
@@ -48,6 +50,7 @@ const opaqueProviderId: NonNullable<
   ...providerAttribution,
   provider: 'other',
   provider_id: 'openrouter',
+  observed_provider_id: 'openai',
 };
 
 void opaqueProviderId;
@@ -58,6 +61,7 @@ const nullableProviderAttribution: NonNullable<
   ...providerAttribution,
   provider: 'other',
   provider_id: null,
+  observed_provider_id: null,
 };
 
 void nullableProviderAttribution;

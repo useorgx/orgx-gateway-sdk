@@ -56,6 +56,7 @@ const userManagedCompletion = (runId) => ({
   ...completed(runId),
   provider: 'other',
   provider_id: null,
+  observed_provider_id: 'openai',
   source_driver: 'opencode',
   source_sub_type: 'user_managed',
 });
@@ -63,6 +64,7 @@ const userManagedCompletion = (runId) => ({
 const opaqueProviderAttribution = {
   provider: 'other',
   provider_id: 'openrouter',
+  observed_provider_id: 'openai',
   source_sub_type: 'user_managed',
   source_driver: 'opencode',
   tokens_used: 1,
@@ -315,7 +317,7 @@ function createV2Driver(
 }
 
 describe('PeerClient', () => {
-  it('round-trips an explicitly null provider id over the socket', async () => {
+  it('round-trips separate leased and observed provider ids over the socket', async () => {
     const socket = new FakeSocket();
     const driver = createDriver({ count: 0 });
     driver.id = 'opencode';
@@ -346,6 +348,29 @@ describe('PeerClient', () => {
     assert.equal(socket.sent.at(-1).source_driver, 'opencode');
     assert.equal(socket.sent.at(-1).provider, 'other');
     assert.equal(socket.sent.at(-1).provider_id, null);
+    assert.equal(socket.sent.at(-1).observed_provider_id, 'openai');
+  });
+
+  it('preserves an explicitly null observed provider id on the socket', () => {
+    const socket = new FakeSocket();
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-opencode-plugin',
+      drivers: [createDriver({ count: 0 })],
+      webSocketFactory: () => socket,
+    });
+    client.connect();
+    socket.emit('open');
+    client.send({
+      ...completed('run-null-observed-provider'),
+      provider_id: 'openrouter',
+      observed_provider_id: null,
+    });
+
+    assert.equal(socket.sent.at(-1).provider_id, 'openrouter');
+    assert.equal(socket.sent.at(-1).observed_provider_id, null);
   });
 
   it('keeps a missing provider id absent on the socket', async () => {
@@ -367,6 +392,7 @@ describe('PeerClient', () => {
       'completion without provider id'
     );
     assert.equal('provider_id' in socket.sent.at(-1), false);
+    assert.equal('observed_provider_id' in socket.sent.at(-1), false);
   });
 
   it('rejects an unknown terminal receipt source at runtime', async () => {
@@ -939,14 +965,17 @@ describe('PeerClient', () => {
     assert.equal(socket.sent.filter((message) => message.kind === 'task.completed').length, 1);
   });
 
-  it('recovers a completion through the idempotent HTTP receipt endpoint', async () => {
+  it('preserves a null observed provider id through HTTP recovery', async () => {
     const socket = new FakeSocket();
     const requests = [];
     const driver = createDriver({ count: 0 });
     driver.id = 'opencode';
     driver.dispatch = async function* (_task, context) {
       yield { kind: 'task.started', run_id: context.run_id, started_at: 'now' };
-      yield userManagedCompletion(context.run_id);
+      yield {
+        ...userManagedCompletion(context.run_id),
+        observed_provider_id: null,
+      };
     };
     socket.send = () => {
       throw new Error('socket dropped');
@@ -977,6 +1006,7 @@ describe('PeerClient', () => {
     assert.equal(body.source_driver, 'opencode');
     assert.equal(body.provider, 'other');
     assert.equal(body.provider_id, null);
+    assert.equal(body.observed_provider_id, null);
   });
 
   it('keeps a missing provider id absent during HTTP recovery', async () => {
@@ -1006,6 +1036,7 @@ describe('PeerClient', () => {
     await waitFor(() => requests.length === 1, 'HTTP recovery receipt');
     const body = JSON.parse(requests[0].init.body);
     assert.equal('provider_id' in body, false);
+    assert.equal('observed_provider_id' in body, false);
   });
 
   it('recovers a v2 terminal result with the canonical result intact', async () => {
