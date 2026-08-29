@@ -965,6 +965,159 @@ describe('PeerClient', () => {
     assert.equal(socket.sent.filter((message) => message.kind === 'task.completed').length, 1);
   });
 
+  it('replays an identical task failure exactly once after its first socket write is lost', async () => {
+    const sockets = [];
+    const timers = [];
+    const attemptedFailures = [];
+    const requests = [];
+    const counter = { count: 0 };
+    const driver = createDriver(counter);
+    driver.dispatch = async function* (_task, context) {
+      counter.count += 1;
+      const failure = {
+        kind: 'task.failed',
+        run_id: context.run_id,
+        reason: 'provider session closed before completion',
+        recoverable: true,
+      };
+      yield { kind: 'task.started', run_id: context.run_id, started_at: 'now' };
+      yield failure;
+      failure.reason = 'later cleanup error must not replace the terminal payload';
+      throw new Error('cleanup failed after the terminal failure was emitted');
+    };
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      drivers: [driver],
+      reconnect: { initialDelayMs: 1, jitterRatio: 0 },
+      webSocketFactory() {
+        const socket = new FakeSocket();
+        if (sockets.length === 0) {
+          const normalSend = socket.send.bind(socket);
+          socket.send = (data) => {
+            const message = JSON.parse(data);
+            if (message.kind === 'task.failed') {
+              attemptedFailures.push(message);
+              throw new Error('first failure write was lost');
+            }
+            normalSend(data);
+          };
+        }
+        sockets.push(socket);
+        return socket;
+      },
+      async fetch(url, init) {
+        requests.push({ url: String(url), init });
+        return new Response('{}', { status: 201 });
+      },
+      setTimeout(fn) {
+        timers.push(fn);
+        return timers.length;
+      },
+      clearTimeout() {},
+    });
+    const message = dispatch('run-failure-replay', 'dispatch-failure-replay');
+
+    client.connect();
+    sockets[0].emit('open');
+    sockets[0].emit('message', { data: JSON.stringify(message) });
+    await waitFor(() => attemptedFailures.length === 1, 'lost failure write');
+
+    sockets[0].emit('message', { data: JSON.stringify(message) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(counter.count, 1, 'pending failure suppresses duplicate dispatch');
+    assert.equal(requests.length, 0, 'task.failed has no HTTP recovery path');
+
+    sockets[0].emit('close', { code: 1006, reason: 'network' });
+    timers.shift()();
+    sockets[1].emit('open');
+    await waitFor(
+      () => sockets[1].sent.some((sent) => sent.kind === 'task.failed'),
+      'replayed failure'
+    );
+    const replayedFailures = sockets[1].sent.filter(
+      (sent) => sent.kind === 'task.failed'
+    );
+    assert.equal(replayedFailures.length, 1);
+    assert.deepEqual(replayedFailures[0], attemptedFailures[0]);
+    assert.equal(
+      replayedFailures[0].reason,
+      'provider session closed before completion'
+    );
+
+    sockets[1].emit('close', { code: 1006, reason: 'network' });
+    timers.shift()();
+    sockets[2].emit('open');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      sockets[2].sent.some((sent) => sent.kind === 'task.failed'),
+      false,
+      'successful replay clears the pending failure'
+    );
+
+    sockets[2].emit('message', { data: JSON.stringify(message) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(counter.count, 1, 'acknowledged failure stays deduplicated');
+  });
+
+  it('does not replay a task failure after its first socket write succeeds', async () => {
+    const sockets = [];
+    const timers = [];
+    const counter = { count: 0 };
+    const driver = createDriver(counter);
+    driver.dispatch = async function* (_task, context) {
+      counter.count += 1;
+      yield {
+        kind: 'task.failed',
+        run_id: context.run_id,
+        reason: 'non-retryable provider rejection',
+        recoverable: false,
+      };
+    };
+    const client = new PeerClient({
+      baseUrl: 'wss://useorgx.com',
+      apiKey: 'oxk_test',
+      workspaceId: 'workspace-1',
+      pluginId: 'orgx-codex-plugin',
+      drivers: [driver],
+      reconnect: { initialDelayMs: 1, jitterRatio: 0 },
+      webSocketFactory() {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      setTimeout(fn) {
+        timers.push(fn);
+        return timers.length;
+      },
+      clearTimeout() {},
+    });
+    const message = dispatch('run-failure-ack', 'dispatch-failure-ack');
+
+    client.connect();
+    sockets[0].emit('open');
+    sockets[0].emit('message', { data: JSON.stringify(message) });
+    await waitFor(
+      () => sockets[0].sent.some((sent) => sent.kind === 'task.failed'),
+      'acknowledged failure'
+    );
+
+    sockets[0].emit('close', { code: 1006, reason: 'network' });
+    timers.shift()();
+    sockets[1].emit('open');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      sockets[1].sent.some((sent) => sent.kind === 'task.failed'),
+      false
+    );
+
+    sockets[1].emit('message', { data: JSON.stringify(message) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(counter.count, 1);
+  });
+
   it('preserves a null observed provider id through HTTP recovery', async () => {
     const socket = new FakeSocket();
     const requests = [];

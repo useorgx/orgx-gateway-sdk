@@ -25,6 +25,7 @@ import {
   type ServerToPeerMessage,
   type TaskCompletedMessage,
   type TaskDispatchMessage,
+  type TaskFailedMessage,
   type TaskFinalizationMessage,
   type TaskResultMessage,
 } from './protocol.js';
@@ -102,6 +103,10 @@ const IDEMPOTENCY_CACHE_LIMIT = 1_000;
 const NON_RETRYABLE_CLOSE_CODES = new Set([1000, 4000, 4001, 4003, 4401, 4403]);
 const RUNNER_INSTANCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 type TerminalReceiptMessage = TaskCompletedMessage | TaskResultMessage;
+type PendingTaskFailure = {
+  idempotencyKey: string;
+  message: TaskFailedMessage;
+};
 
 export class PeerClient {
   private ws: WebSocketLike | null = null;
@@ -110,6 +115,7 @@ export class PeerClient {
   private readonly completedDispatches = new Map<string, string>();
   private readonly inFlightDispatches = new Map<string, Promise<void>>();
   private readonly pendingReceipts = new Map<string, TerminalReceiptMessage>();
+  private readonly pendingTaskFailures = new Map<string, PendingTaskFailure>();
   private readonly pendingContinuationReceipts = new Map<
     string,
     ContinuationReceiptMessage
@@ -261,6 +267,7 @@ export class PeerClient {
       if (
         this.completedDispatches.has(msg.idempotency_key) ||
         this.inFlightDispatches.has(msg.idempotency_key) ||
+        this.pendingTaskFailures.has(msg.idempotency_key) ||
         this.suspendedDispatches.has(msg.idempotency_key)
       ) {
         return;
@@ -407,12 +414,11 @@ export class PeerClient {
   ): Promise<void> {
     const driver = this.driversById.get(msg.task.driver);
     if (!driver) {
-      this.sendSafely({
-        kind: 'task.failed',
-        run_id: msg.run_id,
-        reason: `No driver registered for '${msg.task.driver}'`,
-        recoverable: false,
-      });
+      this.sendProtocolFailure(
+        msg.idempotency_key,
+        msg.run_id,
+        new Error(`No driver registered for '${msg.task.driver}'`)
+      );
       return;
     }
 
@@ -427,7 +433,7 @@ export class PeerClient {
           throw new Error('dispatch identity does not match execution envelope');
         }
       } catch (error) {
-        this.sendProtocolFailure(msg.run_id, error);
+        this.sendProtocolFailure(msg.idempotency_key, msg.run_id, error);
         return;
       }
     }
@@ -435,7 +441,7 @@ export class PeerClient {
     let terminalResult: TerminalReceiptMessage | null = null;
     let finalization: TaskFinalizationMessage | null = null;
     let suspended = false;
-    let failed = false;
+    let failureResult: TaskFailedMessage | null = null;
     try {
       for await (const outbound of driver.dispatch(msg.task, {
         run_id: msg.run_id,
@@ -446,8 +452,9 @@ export class PeerClient {
           : {}),
       })) {
         if (outbound.kind === 'task.suspended') {
-          if (terminalResult || finalization || suspended || failed) {
+          if (terminalResult || finalization || suspended || failureResult) {
             this.sendProtocolFailure(
+              msg.idempotency_key,
               msg.run_id,
               new Error('driver emitted multiple terminal or suspended results')
             );
@@ -456,21 +463,23 @@ export class PeerClient {
           suspended = true;
           this.sendSafely(outbound);
         } else if (outbound.kind === 'task.failed') {
-          if (terminalResult || finalization || suspended || failed) {
+          if (terminalResult || finalization || suspended || failureResult) {
             this.sendProtocolFailure(
+              msg.idempotency_key,
               msg.run_id,
               new Error('driver emitted multiple terminal or suspended results')
             );
             return;
           }
-          failed = true;
-          this.sendSafely(outbound);
+          failureResult = outbound;
+          this.deliverTaskFailure(msg.idempotency_key, outbound);
         } else if (
           outbound.kind === 'task.completed' ||
           isTaskFinalization(outbound)
         ) {
-          if (terminalResult || finalization || suspended || failed) {
+          if (terminalResult || finalization || suspended || failureResult) {
             this.sendProtocolFailure(
+              msg.idempotency_key,
               msg.run_id,
               new Error('driver emitted multiple terminal results')
             );
@@ -478,6 +487,7 @@ export class PeerClient {
           }
           if (isV2TaskDispatch(msg) !== isTaskFinalization(outbound)) {
             this.sendProtocolFailure(
+              msg.idempotency_key,
               msg.run_id,
               new Error(`protocol v${protocolVersion} terminal result mismatch`)
             );
@@ -486,6 +496,7 @@ export class PeerClient {
           if (isTaskFinalization(outbound) && isV2TaskDispatch(msg)) {
             if (outbound.run_id !== msg.run_id) {
               this.sendProtocolFailure(
+                msg.idempotency_key,
                 msg.run_id,
                 new Error('finalization request run id mismatch')
               );
@@ -509,8 +520,8 @@ export class PeerClient {
         this.suspendedDispatches.set(msg.idempotency_key, msg.run_id);
         return;
       }
-      if (failed) {
-        this.rememberCompleted(msg.idempotency_key, msg.run_id);
+      if (failureResult) {
+        this.deliverTaskFailure(msg.idempotency_key, failureResult);
         return;
       }
       if (finalization && isV2TaskDispatch(msg)) {
@@ -531,6 +542,7 @@ export class PeerClient {
           };
         } catch (error) {
           this.sendProtocolFailure(
+            msg.idempotency_key,
             msg.run_id,
             error,
             error instanceof ExecutionFinalizationError
@@ -542,6 +554,7 @@ export class PeerClient {
       }
       if (!terminalResult) {
         this.sendProtocolFailure(
+          msg.idempotency_key,
           msg.run_id,
           new Error('driver ended without a terminal result')
         );
@@ -558,21 +571,61 @@ export class PeerClient {
       }
     } catch (error) {
       this.config.onError?.(error);
-      this.sendProtocolFailure(msg.run_id, error, true);
+      this.sendProtocolFailure(
+        msg.idempotency_key,
+        msg.run_id,
+        error,
+        true
+      );
     }
   }
 
   private sendProtocolFailure(
+    idempotencyKey: string,
     runId: string,
     error: unknown,
     recoverable = false
   ): void {
-    this.sendSafely({
+    this.deliverTaskFailure(idempotencyKey, {
       kind: 'task.failed',
       run_id: runId,
       reason: error instanceof Error ? error.message : String(error),
       recoverable,
     });
+  }
+
+  private deliverTaskFailure(
+    idempotencyKey: string,
+    message: TaskFailedMessage
+  ): void {
+    if (
+      this.pendingTaskFailures.has(idempotencyKey) ||
+      this.completedDispatches.has(idempotencyKey)
+    ) {
+      return;
+    }
+    const pending = {
+      idempotencyKey,
+      message: snapshotTaskFailure(message),
+    };
+    this.pendingTaskFailures.set(idempotencyKey, pending);
+    this.sendPendingTaskFailure(pending);
+  }
+
+  private sendPendingTaskFailure(pending: PendingTaskFailure): void {
+    try {
+      this.send(pending.message);
+      if (this.pendingTaskFailures.get(pending.idempotencyKey) !== pending) {
+        return;
+      }
+      this.pendingTaskFailures.delete(pending.idempotencyKey);
+      this.rememberCompleted(
+        pending.idempotencyKey,
+        pending.message.run_id
+      );
+    } catch (error) {
+      this.config.onError?.(error);
+    }
   }
 
   private sendSafely(message: PeerToServerMessage): void {
@@ -603,6 +656,9 @@ export class PeerClient {
   }
 
   private async flushPendingReceipts(): Promise<void> {
+    for (const failure of this.pendingTaskFailures.values()) {
+      this.sendPendingTaskFailure(failure);
+    }
     for (const receipt of this.pendingReceipts.values()) {
       await this.postReceipt(receipt);
     }
@@ -695,6 +751,10 @@ export class PeerClient {
       this.config.onError?.(error);
     }
   }
+}
+
+function snapshotTaskFailure(message: TaskFailedMessage): TaskFailedMessage {
+  return JSON.parse(JSON.stringify(message)) as TaskFailedMessage;
 }
 
 function sourceClientForPlugin(pluginId: string): string {
