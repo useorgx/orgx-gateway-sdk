@@ -107,6 +107,7 @@ export type TaskCompletedMessage = {
     completed_at: string;
     tokens_used: number;
     provider: Provider;
+    provider_id?: string | null;
     source_sub_type: SourceSubType;
     source_driver: TaskDriver;
     cost_estimate_cents: number;
@@ -119,6 +120,7 @@ export type TaskResultMessage = {
     execution_result: ExecutionResult;
     provider_attribution?: {
         provider: Provider;
+        provider_id?: string | null;
         source_sub_type: SourceSubType;
         source_driver: TaskDriver;
         tokens_used: number;

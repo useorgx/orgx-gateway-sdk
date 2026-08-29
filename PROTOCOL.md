@@ -71,6 +71,11 @@ provider but the local client does not expose whether its credential came from
 OAuth, a subscription, or an API key. They must not guess a more specific
 commercial source from successful execution alone.
 
+Terminal provider attribution may also carry `provider_id`. It is an opaque,
+optional provider-route identifier and may be `null` when the route is
+explicitly unknown. Peers and recovery transports preserve its exact state:
+missing, `null`, or the original string value.
+
 ## v2 proof-carrying boundary
 
 Protocol v2 preserves the familiar task description for driver UX while making
